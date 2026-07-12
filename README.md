@@ -1,0 +1,120 @@
+# tinycerilte
+
+最小の HDL シミュレータ。信号宣言・組み合わせ/順序代入・XOR演算子のみをサポートする独自言語のソースコードをパースし、ネットリストを生成、シミュレーションまで実行する。
+
+## クイックスタート
+
+```bash
+cargo run -- example/example1.tc --cycles 6
+```
+
+出力:
+
+```
+--- Phase 5: Simulation (6 cycles) ---
+
+cycle  a  b
+-----------
+    0  1  0
+    1  1  1
+    2  0  1
+    3  0  0
+    4  1  0
+    5  1  1
+```
+
+## 言語
+
+### サンプル
+
+```
+{
+    var a: bit;
+    var b: bit;
+
+    a = b ^ 1;    // 組み合わせ代入（即時反映）
+    b <= a;       // 順序代入（1サイクル遅れ）
+}
+```
+
+### 文法
+
+```
+program     = block+
+block       = "{" (decl | stmt)* "}"
+decl        = "var" ident ":" "bit" ("<" number ">")? ";"
+stmt        = ident ("=" | "<=") expr ";"
+expr        = primary ("^" primary)?
+primary     = ident | number
+```
+
+- `var x: bit` — 1ビット信号を宣言（初期値 0）
+- `var x: bit<N>` — Nビット信号を宣言
+- `a = expr;` — 組み合わせ代入（即時反映）
+- `a <= expr;` — 順序代入（サイクル開始時の値で評価、終了時に一斉反映）
+
+### 制限（現在）
+
+- 演算子は XOR (`^`) のみ
+- リテラルは10進数のみ（ビットベクタ未対応）
+- 単一ブロックのみ（モジュール・階層なし）
+- シミュレーションはパニックによる停止のみ（VCDダンプ未対応）
+
+## アーキテクチャ
+
+5段階パイプライン:
+
+```
+Source (.tc)
+  ↓ Lexer — 字句解析
+Token列
+  ↓ Parser — 構文解析（再帰下降）
+AST (Program)
+  ↓ Elaboration — シンボル解決・型解決 + 多重ドライバ/組合せループ検出
+Elaborated IR
+  ↓ Netlist Builder — DAG構築
+Netlist (信号DAG)
+  ↓ Simulator — Δ-サイクル評価
+波形出力
+```
+
+詳細は `docs/architecture.md` を参照。
+
+## CLI
+
+```bash
+cargo run                          # サンプルコード（ネットリスト表示）
+cargo run -- file.tc               # ファイル指定
+cargo run -- file.tc --cycles 10   # シミュレーション実行
+cargo run -- --cycles 6            # サンプルコードを6サイクル
+```
+
+## テスト
+
+```bash
+cargo test
+cargo clippy -- -D warnings
+```
+
+## プロジェクト構成
+
+```
+src/
+  lib.rs           クレートエクスポート
+  main.rs          CLI エントリポイント
+  ast.rs           AST 型定義
+  lexer.rs         字句解析
+  parser.rs        構文解析
+  elaboration.rs   シンボル解決・静的チェック
+  netlist.rs       ネットリスト生成
+  simulator.rs     シミュレーション実行
+tests/             結合テスト
+docs/
+  architecture.md  アーキテクチャドキュメント
+example/
+  example1.tc      サンプルコード
+```
+
+## ライセンス
+
+MIT

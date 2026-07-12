@@ -1,0 +1,153 @@
+use crate::netlist::{DriveKind, Node, NodeId};
+
+/// 組み合わせ評価の最大Δ-サイクル数（これを超えると組合せループと判定）
+const MAX_COMB_ITERATIONS: u32 = 1000;
+
+/// シミュレーション結果の1サイクル分
+#[derive(Debug, Clone)]
+pub struct CycleSnapshot {
+    pub cycle: u64,
+    pub values: Vec<u64>,
+}
+
+/// シミュレーター
+pub struct Simulator {
+    signal_values: Vec<u64>,
+    cycle: u64,
+}
+
+impl Simulator {
+    /// 全信号を0で初期化
+    pub fn new(signal_count: usize) -> Self {
+        Self {
+            signal_values: vec![0; signal_count],
+            cycle: 0,
+        }
+    }
+
+    /// 信号に初期値を設定（0サイクル目実行前）
+    pub fn set_signal(&mut self, id: usize, value: u64) {
+        self.signal_values[id] = value;
+    }
+
+    /// 現在の信号値を取得
+    pub fn signal_values(&self) -> &[u64] {
+        &self.signal_values
+    }
+
+    /// 現在のサイクル数
+    pub fn cycle(&self) -> u64 {
+        self.cycle
+    }
+
+    /// 1サイクル進める
+    pub fn step(&mut self, nodes: &[Node]) -> CycleSnapshot {
+        // サイクル開始時の値でスナップショット（ノンブロッキング代入の参照用）
+        let snapshot = self.signal_values.clone();
+
+        // Phase 1: 組み合わせ評価（Δ-サイクル収束まで、上限付き）
+        let mut converged = false;
+        for _ in 0..MAX_COMB_ITERATIONS {
+            let old = self.signal_values.clone();
+            for node in nodes {
+                if let Node::Drive {
+                    signal_id,
+                    source,
+                    kind: DriveKind::Combinational,
+                    ..
+                } = node
+                {
+                    self.signal_values[*signal_id] =
+                        eval_node(*source, nodes, &self.signal_values);
+                }
+            }
+            if old == self.signal_values {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            panic!(
+                "組合せループを検出: {}回のΔ反復で収束しませんでした。\
+                 回路に組合せフィードバック（例: a = a ^ 1）がないか確認してください",
+                MAX_COMB_ITERATIONS
+            );
+        }
+
+        // Phase 2: 順序評価（ノンブロッキング）
+        // 参照する値はサイクル開始時の snapshot（comb による更新前）
+        let mut next = self.signal_values.clone();
+        for node in nodes {
+            if let Node::Drive {
+                signal_id,
+                source,
+                kind: DriveKind::Sequential,
+                ..
+            } = node
+            {
+                next[*signal_id] = eval_node(*source, nodes, &snapshot);
+            }
+        }
+        self.signal_values = next;
+
+        let snapshot_out = CycleSnapshot {
+            cycle: self.cycle,
+            values: self.signal_values.clone(),
+        };
+        self.cycle += 1;
+        snapshot_out
+    }
+
+    /// Nサイクル実行し、全スナップショットを返す
+    pub fn run(&mut self, nodes: &[Node], cycles: u64) -> Vec<CycleSnapshot> {
+        (0..cycles).map(|_| self.step(nodes)).collect()
+    }
+}
+
+/// ノードの値を再帰評価する
+fn eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64 {
+    match &nodes[node_id] {
+        Node::Const { value, .. } => *value,
+        Node::ReadSignal { signal_id, .. } => signal_values[*signal_id],
+        Node::BinOp { op: crate::ast::BinOp::Xor, lhs, rhs, .. } => {
+            eval_node(*lhs, nodes, signal_values) ^ eval_node(*rhs, nodes, signal_values)
+        }
+        Node::Drive { source, .. } => eval_node(*source, nodes, signal_values),
+    }
+}
+
+/// シミュレーション結果をテキスト波形として整形
+pub fn format_waveform(snapshots: &[CycleSnapshot], signals: &[crate::netlist::NetlistSignal]) -> String {
+    if snapshots.is_empty() || signals.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    // ヘッダー行
+    out.push_str("cycle");
+    for sig in signals {
+        out.push_str(&format!(" {:>width$}", sig.name, width = sig.width.max(2) as usize));
+    }
+    out.push('\n');
+
+    // 区切り線
+    out.push_str("-----");
+    for sig in signals {
+        out.push_str(&"-".repeat(sig.width.max(2) as usize + 1));
+    }
+    out.push('\n');
+
+    // 各行
+    for snap in snapshots {
+        out.push_str(&format!("{:>5}", snap.cycle));
+        for sig in signals {
+            let val = snap.values.get(sig.id).copied().unwrap_or(0);
+            let w = sig.width.max(2) as usize;
+            out.push_str(&format!(" {:>width$}", val, width = w));
+        }
+        out.push('\n');
+    }
+
+    out
+}

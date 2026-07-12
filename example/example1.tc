@@ -1,0 +1,7 @@
+{
+    var     a: bit;
+    var     b: bit;
+
+    a = b ^ 1;
+    b <= a;
+}
