@@ -2,7 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use tinycerilte::ast;
 use tinycerilte::elaboration;
-use tinycerilte::lexer;
 use tinycerilte::netlist;
 use tinycerilte::parser;
 use tinycerilte::simulator;
@@ -55,23 +54,9 @@ fn main() {
         }
     };
 
-    // Phase 1: Lex
-    println!("--- Phase 1: Lex ---");
-    {
-        let mut lex = lexer::Lexer::new(&source);
-        loop {
-            let tok = lex.next_token();
-            if matches!(tok, lexer::Token::Eof) {
-                break;
-            }
-            println!("  {:?}", tok);
-        }
-    }
-
-    // Phase 2: Parse
-    println!("\n--- Phase 2: Parse ---");
-    let mut parse = parser::Parser::new(&source);
-    let prog = match parse.parse_program() {
+    // Phase 1: Parse
+    println!("\n--- Phase 1: Parse ---");
+    let prog = match parser::Parser::parse_program(&source) {
         Ok(p) => {
             println!("  OK: {} block(s)", p.blocks.len());
             for (i, block) in p.blocks.iter().enumerate() {
@@ -104,8 +89,8 @@ fn main() {
         }
     };
 
-    // Phase 3: Elaboration
-    println!("\n--- Phase 3: Elaboration ---");
+    // Phase 2: Elaboration
+    println!("\n--- Phase 2: Elaboration ---");
     let elab = match elaboration::elaborate(&prog) {
         Ok(e) => {
             println!("  OK: {} signal(s), {} stmt(s)", e.signals.len(), e.stmts.len());
@@ -120,15 +105,15 @@ fn main() {
         }
     };
 
-    // Phase 4: Netlist
-    println!("\n--- Phase 4: Netlist Build ---");
+    // Phase 3: Netlist
+    println!("\n--- Phase 3: Netlist Build ---");
     let nl = netlist::build_netlist(&elab);
     println!();
     println!("{}", netlist::format_netlist(&nl));
 
-    // Phase 5: Simulation (if requested)
+    // Phase 4: Simulation (if requested)
     if let Some(n) = cycles {
-        println!("--- Phase 5: Simulation ({n} cycles) ---\n");
+        println!("--- Phase 4: Simulation ({n} cycles) ---\n");
         let mut sim = simulator::Simulator::new(nl.signals.len());
         if n > 0 {
             let snaps = sim.run(&nl.nodes, n);

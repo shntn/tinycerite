@@ -4,15 +4,13 @@ tinycerilte は最小の HDL シミュレータ。入出力は以下。
 
 ```
 Source (.tc)
-  ↓ [Phase 1] Lexer
-Token列
-  ↓ [Phase 2] Parser
+  ↓ Parser (pest) — 字句解析 + 構文解析
 AST (Program)
-  ↓ [Phase 3] Elaboration
-解決済みIR (Elaborated)
-  ↓ [Phase 4] Netlist Builder
+  ↓ Elaboration — シンボル解決・型解決 + 静的チェック
+Elaborated IR
+  ↓ Netlist Builder — DAG構築
 Netlist (信号DAG)
-  ↓ [Phase 5] Simulator
+  ↓ Simulator — Δ-サイクル評価
 波形出力
 ```
 
@@ -61,9 +59,9 @@ number      = [0-9]+
 
 | モジュール | ファイル | 役割 |
 |---|---|---|
+| `grammar.pest` | `src/grammar.pest` | PEG 文法定義（pest が読み込む） |
 | `ast` | `src/ast.rs` | AST 型定義 |
-| `lexer` | `src/lexer.rs` | 字句解析（Source → Token） |
-| `parser` | `src/parser.rs` | 構文解析（Token → AST） |
+| `parser` | `src/parser.rs` | 構文解析（Source → AST, pest ラッパー） |
 | `elaboration` | `src/elaboration.rs` | シンボル解決・型解決 |
 | `netlist` | `src/netlist.rs` | ネットリスト生成（DAG構築） |
 | `simulator` | `src/simulator.rs` | シミュレーション実行 |
@@ -125,141 +123,82 @@ number      = [0-9]+
 
 ---
 
-### `lexer` モジュール
-
-#### `Token` (enum)
-- 役割: 字句解析の出力単位。1つの「単語」を表す。
-- バリアント:
-  - `Var` — キーワード `var`
-  - `Bit` — キーワード `bit`
-  - `LBrace` — `{`
-  - `RBrace` — `}`
-  - `LBracket` — `[`
-  - `RBracket` — `]`
-  - `LAngle` — `<`
-  - `RAngle` — `>`
-  - `Semicolon` — `;`
-  - `Colon` — `:`
-  - `Assign` — `=`
-  - `NonBlockAssign` — `<=`
-  - `Caret` — `^`
-  - `Number(u64)` — 数値リテラル（10進数）
-  - `Ident(String)` — 識別子（変数名）
-  - `Eof` — 入力終端
-  - `Error(String)` — 字句エラー（内容を文字列で保持）
-
-- `Display` 実装: 各トークンに対応する文字列表現を返す（エラーは `<ERROR: ...>`）
-
-#### `Lexer`
-- 役割: ソース文字列を先頭から読み、1トークンずつ切り出す。
-- フィールド:
-  - `chars: Vec<char>` — 入力文字列を char の配列にしたもの
-  - `pos: usize` — 現在の読み取り位置（0-indexed）
-
-##### `Lexer::new(input: &str) -> Self`
-- 概要: 入力文字列を受け取り、Lexer を初期化する。
-- 引数: `input` — パース対象のソースコード文字列
-- 処理: 入力を `Vec<char>` に変換し、位置を0にセットする。
-
-##### `Lexer::next_token(&mut self) -> Token`
-- 概要: 現在位置から次の1トークンを読み、位置を進めて返す。
-- 処理:
-  1. `skip_whitespace()` で空白を読み飛ばす
-  2. 位置が末尾なら `Eof` を返す
-  3. 先頭文字が英字または `_` → `read_ident_or_keyword()`
-  4. 先頭文字が数字 → `read_number()`
-  5. 記号の場合:
-     - `{` `}` `[` `]` `;` `:` `^` `=` → 対応するトークンを返す
-     - `<` → 次が `=` なら `NonBlockAssign`、さもなくば `LAngle`
-     - `>` → `RAngle`
-     - その他 → `Error`
-
-##### `Lexer::read_ident_or_keyword(&mut self) -> Token`
-- 概要: 英数字と `_` の連続を読み、キーワードか識別子かを判定する。
-- 処理: `var` → `Var`, `bit` → `Bit`, それ以外 → `Ident(word)`
-
-##### `Lexer::read_number(&mut self) -> Token`
-- 概要: 数字の連続を読み、`u64` にパースする。
-- 処理: パース成功 → `Number(n)`, 失敗 → `Error`
-
-##### `Lexer::skip_whitespace(&mut self)`
-- 概要: 空白文字（ASCII スペース、タブ、改行）をスキップする。
-
----
-
 ### `parser` モジュール
 
 #### `ParseError`
-- 役割: 構文解析エラー。
+- 役割: 構文解析エラー（pest のエラーをラップ）。
 - フィールド:
-  - `message: String` — エラーメッセージ（日本語）
+  - `message: String` — エラーメッセージ
 
 - `Display` 実装: `"パースエラー: <message>"`
 
+#### `CeriteParser`
+- 役割: pest の derive マクロで `grammar.pest` から自動生成されたパーサー。
+- `pest_derive::Parser` を継承し、`pest::Parser` trait の `parse()` メソッドを実装する。
+
 #### `Parser`
-- 役割: 再帰下降パーサー。Token 列から AST を構築する。
-- フィールド:
-  - `lexer: Lexer` — 内部で持つ字句解析器
-  - `current: Token` — 現在注目中のトークン（1文字先読み）
+- 役割: pest パーサーのラッパー。公開 API を提供する。
+- フィールド: なし（ユニット構造体）
 
-##### `Parser::new(input: &str) -> Self`
-- 概要: 入力文字列から Parser を初期化し、最初のトークンを読み込む。
-
-##### `Parser::parse_program(&mut self) -> Result<Program>`
-- 概要: `Program := Block+`
-- 処理: `Eof` が来るまで `parse_block()` を繰り返し、`Program` を返す。
-
-##### `Parser::parse_block(&mut self) -> Result<Block>`
-- 概要: `Block := "{" (Decl | Stmt)* "}"`
+##### `Parser::parse_program(input: &str) -> Result<Program>`
+- 概要: 入力文字列をパースし、`Program` を返す。
 - 処理:
-  1. `{` を期待
-  2. `}` か `Eof` が来るまで、`var` なら `parse_decl()`、それ以外なら `parse_stmt()` を呼ぶ
-  3. `}` を期待して `Block` を返す
+  1. `CeriteParser::parse(Rule::program, input)` を呼び、pest の `Pairs` を得る
+  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` を抽出
+  3. 各ブロックを `parse_block()` で AST に変換
 
-##### `Parser::parse_decl(&mut self) -> Result<Decl>`
-- 概要: `Decl := "var" Ident ":" "bit" ("<" Number ">")? ";"`
-- 処理:
-  1. `var` を期待
-  2. 識別子を読む（変数名）
-  3. `:` を期待
-  4. `bit` を期待
-  5. `<` があれば数値を読んで幅として保持、なければ `None`
-  6. `>` を期待（幅ありの場合）
-  7. `;` を期待して `Decl` を返す
+#### 内部関数（pest の `Pair<Rule>` → AST 変換）
 
-##### `Parser::parse_stmt(&mut self) -> Result<Stmt>`
-- 概要: `Stmt := Ident ("=" | "<=") Expr ";"`
-- 処理:
-  1. 識別子を読む（代入先）
-  2. `=` なら `Combinational`、`<=` なら `Sequential` を生成
-  3. 右辺を `parse_expr()` で読む
-  4. `;` を期待して `Stmt` を返す
+##### `parse_block(pair: Pair<Rule>) -> Result<Block>`
+- 概要: `block` ルールのペアから `Block` を構築。
+- 処理: 子ペアを走査し、`Rule::decl` → `parse_decl()`、`Rule::stmt` → `parse_stmt()` に振り分け。
 
-##### `Parser::parse_expr(&mut self) -> Result<Expr>`
-- 概要: `Expr := Primary ("^" Primary)?`
-- 処理:
-  1. `parse_primary()` で左辺を読む
-  2. `^` があれば右辺も読んで `BinOp::Xor` を返す
-  3. なければ左辺をそのまま返す
+##### `parse_decl(pair: Pair<Rule>) -> Result<Decl>`
+- 概要: `decl` ルールのペアから `Decl` を構築。
+- 処理: 子ペアから `Rule::ident` → 変数名、`Rule::number` → ビット幅（存在すれば）を抽出。変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `Parser::parse_primary(&mut self) -> Result<Expr>`
-- 概要: `Primary := Ident | Number`
-- 処理: 現在のトークンが識別子なら `Ident(name)`、数値なら `Number(n)` を返す。それ以外はエラー。
+##### `parse_stmt(pair: Pair<Rule>) -> Result<Stmt>`
+- 概要: `stmt` ルールのペアから `Stmt` を構築。
+- 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::expr` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `Parser::check(&self, expected: &Token) -> bool`
-- 概要: 現在のトークンが期待した種類か判定する（値は比較せず discriminant のみ）。値の検証は `expect_ident` / `expect_number` で行う。
+##### `parse_expr(pair: Pair<Rule>) -> Result<Expr>`
+- 概要: `expr` ルールのペアから `Expr` を構築。
+- 処理: `primary ("^" primary)*` のフラットなリストを左結合の `BinOp::Xor` 木に折り畳む。
 
-##### `Parser::advance(&mut self)`
-- 概要: 次のトークンを読み込む。
+##### `parse_primary(pair: Pair<Rule>) -> Result<Expr>`
+- 概要: `primary` ルールのペアから `Expr::Ident` または `Expr::Number` を構築。
+- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`、`Rule::number` → `Number(value)`。識別子は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `Parser::expect(&mut self, expected: &Token) -> Result<()>`
-- 概要: 現在のトークンが期待した種類なら読み進め、違えばエラーを返す。
+##### `is_keyword(s: &str) -> bool`
+- 概要: 文字列がキーワード（`var` / `bit`）かどうかを判定する。
+- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit` も識別子として受理できてしまう）ため、`parse_decl`・`parse_stmt`・`parse_primary` の3箇所で識別子を確定させるたびにこの関数でキーワードを弾き、変数名としての使用を防いでいる。
 
-##### `Parser::expect_ident(&mut self) -> Result<String>`
-- 概要: 現在のトークンが識別子ならその名前を返し、違えばエラー。
+#### 文法ファイル: `grammar.pest`
 
-##### `Parser::expect_number(&mut self) -> Result<u64>`
-- 概要: 現在のトークンが数値ならその値を返し、違えばエラー。
+- 場所: `src/grammar.pest`
+- 役割: PEG 文法の定義ファイル。`pest_derive` がビルド時に読み込んで `CeriteParser` を生成する。
+- 内容:
+
+```pest
+program = { block+ }
+block   = { "{" ~ (decl | stmt)* ~ "}" }
+decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+stmt    = { ident ~ (assign | nonblock) ~ expr ~ ";" }
+assign  = { "=" }
+nonblock= { "<=" }
+expr    = { primary ~ ("^" ~ primary)* }
+primary = { ident | number }
+
+ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+number  = @{ ASCII_DIGIT+ }
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+```
+
+- `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
+- `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
+- `_{ ... }` は silent ルール（AST に現れない）
+- `WHITESPACE` は暗黙的に他のルールのトークン間に挿入される特殊ルール
 
 ---
 
@@ -305,18 +244,18 @@ number      = [0-9]+
 #### `elaborate(prog: &Program) -> Result<Elaborated>`
 - 概要: AST を受け取り、シンボル解決と型解決を行い、解決済みIR を返す。
 - 処理:
-  1. Phase 1 — 宣言走査:
+  1. 宣言走査:
      - 全ブロックの全宣言を走査
      - 重複チェック（同名変数があればエラー）
      - シンボルテーブル（名前→ID）を構築
      - `ResolvedSignal` のリストを作成（`width` のデフォルトは1）
-  2. Phase 2 — 文解決（多重ドライバチェック付き）:
+  2. 文解決（多重ドライバチェック付き）:
      - 全ブロックの全文を走査
      - 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）
      - `HashSet` で同一信号への複数代入を検出（あればエラー）
      - 右辺の式を再帰的に解決（`resolve_expr`）
      - 代入の種類（Combinational/Sequential）を保持
-  3. Phase 3 — 組合せループ検出:
+  3. 組合せループ検出:
      - `check_combinational_loops` を呼び、組合せ代入間の循環依存を検出（あればエラー）
 
 #### `resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr>`
@@ -576,9 +515,9 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 現在のアーキテクチャで新しい機能を追加するときの変更箇所:
 
 | 追加したい機能 | 変更するファイル |
-|---|---|
-| 新しい演算子（&, \|, +, -） | `ast.rs` (BinOp), `lexer.rs` (Token), `parser.rs` (parse_expr), `netlist.rs` (format), `simulator.rs` (eval_node) |
-| ビットベクタリテラル（`7'b000_0001`） | `lexer.rs` (read_number 拡張), `ast.rs` (Expr 拡張) |
-| if/case 文 | `ast.rs` (Stmt 拡張), `parser.rs` (parse_stmt), `netlist.rs` (Node 拡張), `simulator.rs` |
-| モジュール・ポート | `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決) |
+|---|---|---|
+| 新しい演算子（&, \|, +, -） | `ast.rs` (BinOp), `grammar.pest` (exprルール), `parser.rs` (parse_expr), `netlist.rs` (format), `simulator.rs` (eval_node) |
+| ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs` |
+| if/case 文 | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs` |
+| モジュール・ポート | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決) |
 | VCD ダンプ | `simulator.rs` (format_waveform の代わりに VCD 出力) |

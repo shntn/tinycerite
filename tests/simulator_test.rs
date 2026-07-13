@@ -4,7 +4,7 @@ use tinycerilte::parser::Parser;
 use tinycerilte::simulator::{format_waveform, Simulator};
 
 fn setup(input: &str) -> (Simulator, Vec<netlist::Node>, Vec<netlist::NetlistSignal>) {
-    let prog = Parser::new(input).parse_program().unwrap();
+    let prog = Parser::parse_program(input).unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     let nl = netlist::build_netlist(&elab);
     let sim = Simulator::new(nl.signals.len());
@@ -86,4 +86,13 @@ fn empty_waveform_on_no_snapshots() {
 fn combinational_loop_detected() {
     let (mut sim, nodes, _) = setup("{ var a: bit; a = a ^ 1; }");
     sim.step(&nodes); // 収束しないのでパニック
+}
+
+#[test]
+fn chained_xor_evaluates_left_to_right_associatively() {
+    let (mut sim, nodes, _) = setup(
+        "{ var a: bit; var b: bit; var c: bit; var d: bit; a = 1; b = 0; c = 1; d = a ^ b ^ c; }",
+    );
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[3], 0, "d = 1 ^ 0 ^ 1 = 0");
 }

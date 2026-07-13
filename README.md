@@ -11,7 +11,7 @@ cargo run -- example/example1.tc --cycles 6
 出力:
 
 ```
---- Phase 5: Simulation (6 cycles) ---
+--- Phase 4: Simulation (6 cycles) ---
 
 cycle  a  b
 -----------
@@ -32,8 +32,8 @@ cycle  a  b
     var a: bit;
     var b: bit;
 
-    a = b ^ 1;    // 組み合わせ代入（即時反映）
-    b <= a;       // 順序代入（1サイクル遅れ）
+    a = b ^ 1;
+    b <= a;
 }
 ```
 
@@ -62,13 +62,11 @@ primary     = ident | number
 
 ## アーキテクチャ
 
-5段階パイプライン:
+4段階パイプライン:
 
 ```
 Source (.tc)
-  ↓ Lexer — 字句解析
-Token列
-  ↓ Parser — 構文解析（再帰下降）
+  ↓ Parser (pest) — 字句解析 + 構文解析
 AST (Program)
   ↓ Elaboration — シンボル解決・型解決 + 多重ドライバ/組合せループ検出
 Elaborated IR
@@ -102,8 +100,8 @@ cargo clippy -- -D warnings
 src/
   lib.rs           クレートエクスポート
   main.rs          CLI エントリポイント
+  grammar.pest     PEG 文法定義
   ast.rs           AST 型定義
-  lexer.rs         字句解析
   parser.rs        構文解析
   elaboration.rs   シンボル解決・静的チェック
   netlist.rs       ネットリスト生成

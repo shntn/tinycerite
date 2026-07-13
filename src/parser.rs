@@ -1,5 +1,18 @@
+use pest::iterators::Pair;
+use pest::Parser as _;
+use pest_derive::Parser as PestGrammar;
+
 use crate::ast::*;
-use crate::lexer::{Lexer, Token};
+
+/// キーワードとして予約されている識別子
+fn is_keyword(s: &str) -> bool {
+    matches!(s, "var" | "bit")
+}
+
+/// pest パーサー（grammar.pest から自動生成）
+#[derive(PestGrammar)]
+#[grammar = "grammar.pest"]
+pub struct CeriteParser;
 
 /// 構文解析エラー
 #[derive(Debug, Clone)]
@@ -15,168 +28,168 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-type Result<T> = std::result::Result<T, ParseError>;
-
-/// 再帰下降パーサー
-pub struct Parser {
-    lexer: Lexer,
-    current: Token,
+impl From<pest::error::Error<Rule>> for ParseError {
+    fn from(e: pest::error::Error<Rule>) -> Self {
+        ParseError {
+            message: e.to_string(),
+        }
+    }
 }
 
-impl Parser {
-    pub fn new(input: &str) -> Self {
-        let mut lexer = Lexer::new(input);
-        let current = lexer.next_token();
-        Self { lexer, current }
-    }
+type Result<T> = std::result::Result<T, ParseError>;
 
-    /// Program := Block+
-    pub fn parse_program(&mut self) -> Result<Program> {
+/// パーサー（pest ラッパー）
+pub struct Parser;
+
+impl Parser {
+    /// 入力文字列をパースし、AST の Program を返す
+    pub fn parse_program(input: &str) -> Result<Program> {
+        let pairs = CeriteParser::parse(Rule::program, input)?;
         let mut blocks = Vec::new();
-        while !self.check(&Token::Eof) {
-            blocks.push(self.parse_block()?);
+        for pair in pairs {
+            if pair.as_rule() == Rule::program {
+                for block_pair in pair.into_inner() {
+                    if block_pair.as_rule() == Rule::block {
+                        blocks.push(parse_block(block_pair)?);
+                    }
+                }
+            }
         }
         Ok(Program { blocks })
     }
+}
 
-    /// Block := "{" (Decl | Stmt)* "}"
-    fn parse_block(&mut self) -> Result<Block> {
-        self.expect(&Token::LBrace)?;
-        let mut decls = Vec::new();
-        let mut stmts = Vec::new();
+fn parse_block(pair: Pair<Rule>) -> Result<Block> {
+    let mut decls = Vec::new();
+    let mut stmts = Vec::new();
 
-        while !self.check(&Token::RBrace) && !self.check(&Token::Eof) {
-            if self.check(&Token::Var) {
-                decls.push(self.parse_decl()?);
-            } else {
-                stmts.push(self.parse_stmt()?);
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::decl => decls.push(parse_decl(inner)?),
+            Rule::stmt => stmts.push(parse_stmt(inner)?),
+            _ => {} // "{" "}" などは無視
+        }
+    }
+
+    Ok(Block { decls, stmts })
+}
+
+fn parse_decl(pair: Pair<Rule>) -> Result<Decl> {
+    let mut name = String::new();
+    let mut width = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+                if is_keyword(&name) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードであり変数名に使えません", name),
+                    });
+                }
             }
-        }
-
-        self.expect(&Token::RBrace)?;
-        Ok(Block { decls, stmts })
-    }
-
-    /// Decl := "var" Ident ":" "bit" ("<" Number ">")? ";"
-    fn parse_decl(&mut self) -> Result<Decl> {
-        self.expect(&Token::Var)?;
-        let name = self.expect_ident()?;
-        self.expect(&Token::Colon)?;
-        self.expect(&Token::Bit)?;
-
-        let width = if self.check(&Token::LAngle) {
-            self.expect(&Token::LAngle)?;
-            let n = self.expect_number()?;
-            self.expect(&Token::RAngle)?;
-            Some(n)
-        } else {
-            None
-        };
-
-        self.expect(&Token::Semicolon)?;
-        Ok(Decl { name, width })
-    }
-
-    /// Stmt := Ident ("=" | "<=") Expr ";"
-    fn parse_stmt(&mut self) -> Result<Stmt> {
-        let target = self.expect_ident()?;
-
-        if self.check(&Token::Assign) {
-            self.expect(&Token::Assign)?;
-            let expr = self.parse_expr()?;
-            self.expect(&Token::Semicolon)?;
-            Ok(Stmt::Combinational { target, expr })
-        } else if self.check(&Token::NonBlockAssign) {
-            self.expect(&Token::NonBlockAssign)?;
-            let expr = self.parse_expr()?;
-            self.expect(&Token::Semicolon)?;
-            Ok(Stmt::Sequential { target, expr })
-        } else {
-            Err(ParseError {
-                message: format!("代入演算子 (= または <=) が必要ですが、{} が見つかりました", self.current),
-            })
+            Rule::number => {
+                width = Some(
+                    inner
+                        .as_str()
+                        .parse::<u64>()
+                        .map_err(|e| ParseError {
+                            message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
+                        })?,
+                );
+            }
+            _ => {} // "var" ":" "bit" "<" ">" ";" は無視
         }
     }
 
-    /// Expr := Ident | Number | Ident "^" Expr | Number "^" Expr | Ident "^" Number
-    fn parse_expr(&mut self) -> Result<Expr> {
-        let lhs = self.parse_primary()?;
+    Ok(Decl { name, width })
+}
 
-        if self.check(&Token::Caret) {
-            self.expect(&Token::Caret)?;
-            let rhs = self.parse_primary()?;
-            Ok(Expr::BinOp {
-                op: BinOp::Xor,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            })
-        } else {
-            Ok(lhs)
+fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
+    let mut target = String::new();
+    let mut is_seq = false;
+    let mut expr = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                target = inner.as_str().to_string();
+                if is_keyword(&target) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードであり変数名に使えません", target),
+                    });
+                }
+            }
+            Rule::assign => is_seq = false,
+            Rule::nonblock => is_seq = true,
+            Rule::expr => expr = Some(parse_expr(inner)?),
+            _ => {} // ";" は無視
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Expr> {
-        if let Token::Ident(name) = self.current.clone() {
-            self.advance();
+    let expr = expr.ok_or_else(|| ParseError {
+        message: "式が見つかりません".to_string(),
+    })?;
+
+    if is_seq {
+        Ok(Stmt::Sequential { target, expr })
+    } else {
+        Ok(Stmt::Combinational { target, expr })
+    }
+}
+
+fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let mut primaries: Vec<Expr> = Vec::new();
+
+    // primary ("^" primary)* から primary のみ抽出し "^" は無視
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::primary {
+            primaries.push(parse_primary(inner)?);
+        }
+    }
+
+    // primary ("^" primary)* を左結合の BinOp 木に組み立てる
+    // primaries = [a, b, c] → ((a ^ b) ^ c)
+    let mut iter = primaries.into_iter();
+    let first = iter.next().ok_or_else(|| ParseError {
+        message: "式に項がありません".to_string(),
+    })?;
+    Ok(iter.fold(first, |lhs, rhs| Expr::BinOp {
+        op: BinOp::Xor,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }))
+}
+
+fn parse_primary(pair: Pair<Rule>) -> Result<Expr> {
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| ParseError {
+            message: "primary が空です".to_string(),
+        })?;
+
+    match inner.as_rule() {
+        Rule::ident => {
+            let name = inner.as_str().to_string();
+            if is_keyword(&name) {
+                return Err(ParseError {
+                    message: format!("'{}' はキーワードであり識別子として使えません", name),
+                });
+            }
             Ok(Expr::Ident(name))
-        } else if let Token::Number(n) = self.current {
-            self.advance();
+        }
+        Rule::number => {
+            let n = inner
+                .as_str()
+                .parse::<u64>()
+                .map_err(|e| ParseError {
+                    message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
+                })?;
             Ok(Expr::Number(n))
-        } else {
-            Err(ParseError {
-                message: format!("式の開始として識別子か数値が必要ですが、{} が見つかりました", self.current),
-            })
         }
-    }
-
-    // ---- ヘルパー ----
-
-    fn check(&self, expected: &Token) -> bool {
-        std::mem::discriminant(&self.current) == std::mem::discriminant(expected)
-            && match (expected, &self.current) {
-                // 将来の値比較用のアーム（現在は識別子も数値もdiscriminant比較のみ）
-                (Token::Ident(_), Token::Ident(_)) => true,
-                (Token::Number(_), Token::Number(_)) => true,
-                _ => true,
-            }
-    }
-
-    fn advance(&mut self) {
-        self.current = self.lexer.next_token();
-    }
-
-    fn expect(&mut self, expected: &Token) -> Result<()> {
-        if std::mem::discriminant(&self.current) == std::mem::discriminant(expected) {
-            self.advance();
-            Ok(())
-        } else {
-            Err(ParseError {
-                message: format!("{} が必要ですが、{} が見つかりました", expected, self.current),
-            })
-        }
-    }
-
-    fn expect_ident(&mut self) -> Result<String> {
-        match self.current.clone() {
-            Token::Ident(name) => {
-                self.advance();
-                Ok(name)
-            }
-            _ => Err(ParseError {
-                message: format!("識別子が必要ですが、{} が見つかりました", self.current),
-            }),
-        }
-    }
-
-    fn expect_number(&mut self) -> Result<u64> {
-        match self.current {
-            Token::Number(n) => {
-                self.advance();
-                Ok(n)
-            }
-            _ => Err(ParseError {
-                message: format!("数値が必要ですが、{} が見つかりました", self.current),
-            }),
-        }
+        _ => Err(ParseError {
+            message: format!("primary の内部に予期しないルール: {:?}", inner.as_rule()),
+        }),
     }
 }

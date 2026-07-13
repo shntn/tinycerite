@@ -1,0 +1,13 @@
+program = { block+ }
+block   = { "{" ~ (decl | stmt)* ~ "}" }
+decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+stmt    = { ident ~ (assign | nonblock) ~ expr ~ ";" }
+assign  = { "=" }
+nonblock= { "<=" }
+expr    = { primary ~ ("^" ~ primary)* }
+primary = { ident | number }
+
+ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+number  = @{ ASCII_DIGIT+ }
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

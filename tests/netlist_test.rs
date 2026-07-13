@@ -3,13 +3,13 @@ use tinycerilte::netlist::{self, DriveKind};
 use tinycerilte::parser::Parser;
 
 fn netlist_of(input: &str) -> netlist::Netlist {
-    let prog = Parser::new(input).parse_program().unwrap();
+    let prog = Parser::parse_program(input).unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     netlist::build_netlist(&elab)
 }
 
 fn whole_pipeline(input: &str) -> String {
-    let prog = Parser::new(input).parse_program().unwrap();
+    let prog = Parser::parse_program(input).unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     let nl = netlist::build_netlist(&elab);
     netlist::format_netlist(&nl)
