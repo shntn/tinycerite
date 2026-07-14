@@ -109,6 +109,7 @@ src/
 tests/             結合テスト
 docs/
   architecture.md  アーキテクチャドキュメント
+  call-tree.md     関数呼び出しツリー
 example/
   example1.tc      サンプルコード
 ```
