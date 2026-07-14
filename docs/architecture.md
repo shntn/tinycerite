@@ -242,21 +242,25 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 役割: 変数名 → 信号ID のマッピング。エラボレーション中に一時的に構築される。
 
 #### `elaborate(prog: &Program) -> Result<Elaborated>`
-- 概要: AST を受け取り、シンボル解決と型解決を行い、解決済みIR を返す。
+- 概要: AST を受け取り、`build_*` で宣言・文を解決したあと `check_*` を順に適用し、解決済みIR を返す。
 - 処理:
-  1. 宣言走査:
-     - 全ブロックの全宣言を走査
-     - 重複チェック（同名変数があればエラー）
-     - シンボルテーブル（名前→ID）を構築
-     - `ResolvedSignal` のリストを作成（`width` のデフォルトは1）
-  2. 文解決（多重ドライバチェック付き）:
-     - 全ブロックの全文を走査
-     - 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）
-     - `HashSet` で同一信号への複数代入を検出（あればエラー）
-     - 右辺の式を再帰的に解決（`resolve_expr`）
-     - 代入の種類（Combinational/Sequential）を保持
-  3. 組合せループ検出:
-     - `check_combinational_loops` を呼び、組合せ代入間の循環依存を検出（あればエラー）
+  1. `build_signals` で宣言からシンボルテーブルと信号リストを構築
+  2. `resolve_stmts` で代入文の変数名をシンボルIDに解決
+  3. `check_multiple_drivers` で同一信号への複数ドライバを検出
+  4. `check_combinational_loops` で組合せ代入間の循環依存を検出
+- 備考: チェックを追加する場合は同じ形の `check_*` 関数を書き、`elaborate()` に1行足すだけでよい（配列やtraitによる登録機構は導入していない）。
+
+#### `build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>`
+- 概要: 全ブロックの宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。
+- 処理: 重複チェック（同名変数があればエラー）、シンボルテーブル（名前→ID）の構築、`ResolvedSignal` のリスト作成（`width` のデフォルトは1）
+
+#### `resolve_stmts(prog: &Program, symtab: &SymbolTable) -> Result<Vec<ResolvedStmt>>`
+- 概要: 全ブロックの代入文を走査し、変数名をシンボルIDに解決する。
+- 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`）、代入の種類（Combinational/Sequential）を保持
+
+#### `check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>`
+- 概要: 同一信号への複数ドライバ（多重代入）を検出する。
+- 処理: `HashSet` に `target_id` を挿入していき、既に挿入済みの ID が再度出てきたらエラー（信号名は `signals[target_id].name` から引く）
 
 #### `resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr>`
 - 概要: AST の式を再帰的に解決済み式に変換する。
@@ -265,7 +269,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Number(n)` → そのまま
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
 
-#### `check_combinational_loops(stmts: &[ResolvedStmt], signal_names: &[String]) -> Result<()>`
+#### `check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>`
 - 概要: 組合せ代入（Combinational）だけを対象に依存グラフを作り、循環がないか検査する。順序代入（Sequential）は1サイクル遅れて反映されるため依存グラフに含めない（循環があってもループにならない）。
 - 処理:
   1. `deps[信号ID] = その信号を右辺で読む Combinational Drive のターゲットID一覧` を構築（`collect_read_signals` で各文の右辺から読み取り信号を収集）
