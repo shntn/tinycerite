@@ -144,11 +144,27 @@ fn check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) ->
     Ok(())
 }
 
+const WHITE: u8 = 0;
+const GRAY: u8 = 1;
+const BLACK: u8 = 2;
+
 /// 組合せ依存グラフの循環を検出する
 fn check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()> {
-    let n = signals.len();
-    // 依存グラフ: deps[sig] = sig を読み取る組合せDriveのターゲット一覧
-    let mut deps: Vec<Vec<usize>> = vec![vec![]; n];
+    let deps = build_combinational_deps(stmts, signals.len());
+
+    let mut color = vec![WHITE; signals.len()];
+    let mut path = Vec::new();
+    for i in 0..signals.len() {
+        if color[i] == WHITE {
+            dfs_visit(i, &deps, &mut color, &mut path, signals)?;
+        }
+    }
+    Ok(())
+}
+
+/// 組合せ代入の依存グラフを構築する: deps[信号ID] = その信号を右辺で読む組合せDriveのターゲットID一覧
+fn build_combinational_deps(stmts: &[ResolvedStmt], signal_count: usize) -> Vec<Vec<usize>> {
+    let mut deps: Vec<Vec<usize>> = vec![vec![]; signal_count];
     for stmt in stmts {
         if let ResolvedStmt::Combinational { target_id, expr } = stmt {
             for read in collect_read_signals(expr) {
@@ -156,54 +172,46 @@ fn check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal])
             }
         }
     }
+    deps
+}
 
-    // DFS で巡回検出（経路も保持してエラーメッセージに含める）
-    const WHITE: u8 = 0;
-    const GRAY: u8 = 1;
-    const BLACK: u8 = 2;
-    let mut color = vec![WHITE; n];
-    let mut path = Vec::new();
-
-    fn dfs(
-        node: usize,
-        deps: &[Vec<usize>],
-        color: &mut [u8],
-        path: &mut Vec<usize>,
-        signals: &[ResolvedSignal],
-    ) -> Result<()> {
-        color[node] = GRAY;
-        path.push(node);
-        for &next in &deps[node] {
-            if color[next] == GRAY {
-                // 循環発見: 経路を切り出してエラー
-                let cycle_start = path.iter().position(|&x| x == next).unwrap();
-                let cycle: Vec<&str> = path[cycle_start..]
-                    .iter()
-                    .chain(std::iter::once(&next))
-                    .map(|&i| signals[i].name.as_str())
-                    .collect();
-                return Err(ElabError {
-                    message: format!(
-                        "組合せループを検出: {} → {} → ... → {} の循環があります",
-                        cycle[0], cycle[1], cycle[cycle.len() - 2]
-                    ),
-                });
-            }
-            if color[next] == WHITE {
-                dfs(next, deps, color, path, signals)?;
-            }
+/// 依存グラフをDFSで訪問し、循環を検出する（経路を保持し、見つかった循環をエラーに含める）
+fn dfs_visit(
+    node: usize,
+    deps: &[Vec<usize>],
+    color: &mut [u8],
+    path: &mut Vec<usize>,
+    signals: &[ResolvedSignal],
+) -> Result<()> {
+    color[node] = GRAY;
+    path.push(node);
+    for &next in &deps[node] {
+        if color[next] == GRAY {
+            return Err(cycle_error(path, next, signals));
         }
-        path.pop();
-        color[node] = BLACK;
-        Ok(())
-    }
-
-    for i in 0..n {
-        if color[i] == WHITE {
-            dfs(i, &deps, &mut color, &mut path, signals)?;
+        if color[next] == WHITE {
+            dfs_visit(next, deps, color, path, signals)?;
         }
     }
+    path.pop();
+    color[node] = BLACK;
     Ok(())
+}
+
+/// 探索中に見つかった循環から、経路を含むエラーメッセージを組み立てる
+fn cycle_error(path: &[usize], next: usize, signals: &[ResolvedSignal]) -> ElabError {
+    let cycle_start = path.iter().position(|&x| x == next).unwrap();
+    let cycle: Vec<&str> = path[cycle_start..]
+        .iter()
+        .chain(std::iter::once(&next))
+        .map(|&i| signals[i].name.as_str())
+        .collect();
+    ElabError {
+        message: format!(
+            "組合せループを検出: {} → {} → ... → {} の循環があります",
+            cycle[0], cycle[1], cycle[cycle.len() - 2]
+        ),
+    }
 }
 
 /// 解決済み式から参照される信号IDを収集

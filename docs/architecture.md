@@ -269,16 +269,33 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Number(n)` → そのまま
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
 
+#### `WHITE` / `GRAY` / `BLACK` (定数, `u8`)
+- 役割: `dfs_visit` のDFS色付け（未訪問/探索中/探索済み）に使う定数。`check_combinational_loops` と `dfs_visit` の双方から参照するためファイルスコープに定義されている。
+
 #### `check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>`
 - 概要: 組合せ代入（Combinational）だけを対象に依存グラフを作り、循環がないか検査する。順序代入（Sequential）は1サイクル遅れて反映されるため依存グラフに含めない（循環があってもループにならない）。
 - 処理:
-  1. `deps[信号ID] = その信号を右辺で読む Combinational Drive のターゲットID一覧` を構築（`collect_read_signals` で各文の右辺から読み取り信号を収集）
-  2. 白（未訪問）・灰（探索中）・黒（探索済み）で色付けしながら DFS
-  3. 探索中（灰）のノードに戻る辺を見つけたら循環と判定し、経路を含めたエラーメッセージを返す
-  4. 全信号について探索し終えれば `Ok(())`
+  1. `build_combinational_deps` で依存グラフを構築
+  2. 全信号を色 `WHITE` で初期化
+  3. 未訪問（`WHITE`）の信号ごとに `dfs_visit` を呼ぶ
+
+#### `build_combinational_deps(stmts: &[ResolvedStmt], signal_count: usize) -> Vec<Vec<usize>>`
+- 概要: 組合せ代入の依存グラフを構築する。
+- 処理: `deps[信号ID] = その信号を右辺で読む Combinational Drive のターゲットID一覧`（`collect_read_signals` で各文の右辺から読み取り信号を収集）
+
+#### `dfs_visit(node: usize, deps: &[Vec<usize>], color: &mut [u8], path: &mut Vec<usize>, signals: &[ResolvedSignal]) -> Result<()>`
+- 概要: 依存グラフをDFSで訪問し、循環を検出する（経路を `path` に保持する）。
+- 処理:
+  1. 白（未訪問）・灰（探索中）・黒（探索済み）で色付けしながら再帰的にDFS
+  2. 探索中（灰）のノードに戻る辺を見つけたら `cycle_error` でエラーを組み立てて返す
+  3. 未訪問（白）のノードへは再帰的に `dfs_visit` を呼ぶ
+
+#### `cycle_error(path: &[usize], next: usize, signals: &[ResolvedSignal]) -> ElabError`
+- 概要: `dfs_visit` が循環を検出した際、経路を含むエラーメッセージを組み立てる。
+- 処理: `path` から循環の開始位置を探し、そこから `next` までの信号名を `→` で連結してメッセージ化
 
 #### `collect_read_signals(expr: &ResolvedExpr) -> Vec<usize>`
-- 概要: 解決済み式が右辺で参照している信号IDを再帰的に集める（`check_combinational_loops` の依存グラフ構築に使用）。
+- 概要: 解決済み式が右辺で参照している信号IDを再帰的に集める（`build_combinational_deps` の依存グラフ構築に使用）。
 - 処理:
   - `Ident(id)` → `[id]`
   - `Number(_)` → 空
