@@ -134,3 +134,38 @@ fn overflow_number_literal_is_error() {
 fn empty_input_is_error() {
     assert!(Parser::parse_program("").is_err());
 }
+
+#[test]
+fn multiplication_binds_tighter_than_addition() {
+    let prog = parse("{ var x: bit; x = 1 + 2 * 3; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            // 1 + (2 * 3) の形（Addが最外、rhsがMulのBinOp）になっているはず
+            match expr {
+                Expr::BinOp { op: BinOp::Add, rhs, .. } => {
+                    assert!(matches!(**rhs, Expr::BinOp { op: BinOp::Mul, .. }));
+                }
+                _ => panic!("最外は Add であるべき"),
+            }
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn parenthesized_expression_overrides_precedence() {
+    assert!(Parser::parse_program("{ var x: bit; x = (1 + 2) * 3; }").is_ok());
+}
+
+#[test]
+fn all_new_binary_operators_parse_successfully() {
+    let ops = [
+        "||", "&&", "|", "&", "==", "!=", "<", "<=", ">", ">=", "<<", ">>", "<<<", ">>>", "+", "-",
+        "*", "/", "%",
+    ];
+    for op in ops {
+        let src = format!("{{ var x: bit; x = 1 {op} 2; }}");
+        assert!(Parser::parse_program(&src).is_ok(), "演算子 {op} がパースできる");
+    }
+}

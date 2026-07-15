@@ -96,3 +96,38 @@ fn chained_xor_evaluates_left_to_right_associatively() {
     let snap = sim.step(&nodes);
     assert_eq!(snap.values[3], 0, "d = 1 ^ 0 ^ 1 = 0");
 }
+
+#[test]
+fn arithmetic_and_precedence_evaluate_correctly() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<8>; x = 1 + 2 * 3; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 7, "1 + 2 * 3 = 7（* が + より先に評価される）");
+}
+
+#[test]
+fn comparison_operator_yields_boolean_value() {
+    let (mut sim, nodes, _) = setup("{ var x: bit; x = 3 < 5; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 1, "3 < 5 は真なので 1");
+}
+
+#[test]
+fn logical_and_short_circuits_to_zero_when_lhs_is_zero() {
+    let (mut sim, nodes, _) = setup("{ var x: bit; x = 0 && 1; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 0, "0 && 1 は偽なので 0");
+}
+
+#[test]
+fn shift_operators_evaluate_correctly() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<8>; x = 1 << 4; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 16, "1 << 4 = 16");
+}
+
+#[test]
+fn division_by_zero_yields_zero_instead_of_panicking() {
+    let (mut sim, nodes, _) = setup("{ var x: bit; x = 5 / 0; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 0, "0除算は未定義値の代わりに0を返す");
+}

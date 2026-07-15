@@ -67,13 +67,52 @@ pub enum Expr {
 /// 二項演算子
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
+    Or,
+    And,
+    BitOr,
     Xor,
+    BitAnd,
+    Eq,
+    Neq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Shl,
+    Shr,
+    AShl,
+    AShr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BinOp::Xor => write!(f, "^"),
-        }
+        let s = match self {
+            BinOp::Or => "||",
+            BinOp::And => "&&",
+            BinOp::BitOr => "|",
+            BinOp::Xor => "^",
+            BinOp::BitAnd => "&",
+            BinOp::Eq => "==",
+            BinOp::Neq => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::AShl => "<<<",
+            BinOp::AShr => ">>>",
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+        };
+        write!(f, "{s}")
     }
 }

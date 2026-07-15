@@ -109,10 +109,40 @@ fn eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64 {
     match &nodes[node_id] {
         Node::Const { value, .. } => *value,
         Node::ReadSignal { signal_id, .. } => signal_values[*signal_id],
-        Node::BinOp { op: crate::ast::BinOp::Xor, lhs, rhs, .. } => {
-            eval_node(*lhs, nodes, signal_values) ^ eval_node(*rhs, nodes, signal_values)
+        Node::BinOp { op, lhs, rhs, .. } => {
+            let l = eval_node(*lhs, nodes, signal_values);
+            let r = eval_node(*rhs, nodes, signal_values);
+            eval_binop(*op, l, r)
         }
         Node::Drive { source, .. } => eval_node(*source, nodes, signal_values),
+    }
+}
+
+/// 二項演算子を適用する
+///
+/// シフト量が64以上の場合と0除算は、この言語に未定義値('x')が無いため0を返す。
+/// 加減乗算は幅マスキングを行わないため、u64のラップアラウンドで近似している。
+fn eval_binop(op: crate::ast::BinOp, l: u64, r: u64) -> u64 {
+    use crate::ast::BinOp;
+    match op {
+        BinOp::Or => u64::from(l != 0 || r != 0),
+        BinOp::And => u64::from(l != 0 && r != 0),
+        BinOp::BitOr => l | r,
+        BinOp::Xor => l ^ r,
+        BinOp::BitAnd => l & r,
+        BinOp::Eq => u64::from(l == r),
+        BinOp::Neq => u64::from(l != r),
+        BinOp::Lt => u64::from(l < r),
+        BinOp::Le => u64::from(l <= r),
+        BinOp::Gt => u64::from(l > r),
+        BinOp::Ge => u64::from(l >= r),
+        BinOp::Shl | BinOp::AShl => l.checked_shl(r as u32).unwrap_or(0),
+        BinOp::Shr | BinOp::AShr => l.checked_shr(r as u32).unwrap_or(0),
+        BinOp::Add => l.wrapping_add(r),
+        BinOp::Sub => l.wrapping_sub(r),
+        BinOp::Mul => l.wrapping_mul(r),
+        BinOp::Div => l.checked_div(r).unwrap_or(0),
+        BinOp::Mod => l.checked_rem(r).unwrap_or(0),
     }
 }
 

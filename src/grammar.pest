@@ -1,11 +1,31 @@
 program = { block+ }
 block   = { "{" ~ (decl | stmt)* ~ "}" }
 decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
-stmt    = { ident ~ (assign | nonblock) ~ expr ~ ";" }
+stmt    = { ident ~ (assign | nonblock) ~ expression ~ ";" }
 assign  = { "=" }
 nonblock= { "<=" }
-expr    = { primary ~ ("^" ~ primary)* }
-primary = { ident | number }
+expression        = { expression1 ~ (or_op ~ expression1)* }
+expression1       = { expression2 ~ (and_op ~ expression2)* }
+expression2       = { expression3 ~ (bitor_op ~ expression3)* }
+expression3       = { expression4 ~ (xor_op ~ expression4)* }
+expression4       = { expression5 ~ (bitand_op ~ expression5)* }
+expression5       = { expression6 ~ (eq_op ~ expression6)* }
+expression6       = { expression7 ~ (rel_op ~ expression7)* }
+expression7       = { expression8 ~ (shift_op ~ expression8)* }
+expression8       = { expression9 ~ (add_op ~ expression9)* }
+expression9       = { expression_factor ~ (mul_op ~ expression_factor)* }
+expression_factor = { ident | number | "(" ~ expression ~ ")" }
+
+or_op     = { "||" }
+and_op    = { "&&" }
+bitor_op  = { "|" }
+xor_op    = { "^" }
+bitand_op = { "&" }
+eq_op     = { "==" | "!=" }
+rel_op    = { "<=" | "<" | ">=" | ">" }
+shift_op  = { "<<<" | "<<" | ">>>" | ">>" }
+add_op    = { "+" | "-" }
+mul_op    = { "*" | "/" | "%" }
 
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }

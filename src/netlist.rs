@@ -164,10 +164,13 @@ impl NetlistBuilder {
             ResolvedExpr::BinOp { op, lhs, rhs } => {
                 let lhs_id = self.build_expr(lhs, signals);
                 let rhs_id = self.build_expr(rhs, signals);
-                // ビット幅は両オペランドの大きい方
                 let lhs_width = self.node_width(lhs_id);
                 let rhs_width = self.node_width(rhs_id);
-                let width = lhs_width.max(rhs_width);
+                // 論理・比較演算の結果は真偽値（1ビット）、それ以外は両オペランドの大きい方
+                let width = match op {
+                    BinOp::Or | BinOp::And | BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 1,
+                    _ => lhs_width.max(rhs_width),
+                };
                 self.make_binop(*op, lhs_id, rhs_id, width)
             }
         }
@@ -259,11 +262,8 @@ pub fn format_netlist(nl: &Netlist) -> String {
             }
             Node::BinOp { id, op, lhs, rhs, width } => {
                 out.push_str(&format!(
-                    "  N{:>3}: {}  ({} bit)  = N{} {} N{}\n",
-                    id, match op {
-                        BinOp::Xor => "Xor",
-                    },
-                    width, lhs, op, rhs,
+                    "  N{:>3}: BinOp({})  ({} bit)  = N{} {} N{}\n",
+                    id, op, width, lhs, op, rhs,
                 ));
             }
             Node::Drive { id, signal_name, source, kind, .. } => {

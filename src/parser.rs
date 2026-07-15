@@ -122,7 +122,7 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
             }
             Rule::assign => is_seq = false,
             Rule::nonblock => is_seq = true,
-            Rule::expr => expr = Some(parse_expr(inner)?),
+            Rule::expression => expr = Some(parse_expression(inner)?),
             _ => {} // ";" は無視
         }
     }
@@ -138,36 +138,106 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
     }
 }
 
-fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let mut primaries: Vec<Expr> = Vec::new();
-
-    // primary ("^" primary)* から primary のみ抽出し "^" は無視
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::primary {
-            primaries.push(parse_primary(inner)?);
-        }
-    }
-
-    // primary ("^" primary)* を左結合の BinOp 木に組み立てる
-    // primaries = [a, b, c] → ((a ^ b) ^ c)
-    let mut iter = primaries.into_iter();
-    let first = iter.next().ok_or_else(|| ParseError {
+/// 二項演算の優先順位チェーンの1段を左結合の `Expr::BinOp` 木に組み立てる
+///
+/// `pair` は `operand (op operand)*` の形をしたルールで、`parse_operand` で
+/// オペランド1つを解決し、`op_from_str` で演算子ルールの文字列を `BinOp` に変換する。
+fn parse_left_assoc(
+    pair: Pair<Rule>,
+    parse_operand: fn(Pair<Rule>) -> Result<Expr>,
+    op_from_str: fn(&str) -> BinOp,
+) -> Result<Expr> {
+    let mut pairs = pair.into_inner();
+    let first = pairs.next().ok_or_else(|| ParseError {
         message: "式に項がありません".to_string(),
     })?;
-    Ok(iter.fold(first, |lhs, rhs| Expr::BinOp {
-        op: BinOp::Xor,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    }))
+    let mut expr = parse_operand(first)?;
+
+    while let Some(op_pair) = pairs.next() {
+        let op = op_from_str(op_pair.as_str());
+        let rhs_pair = pairs.next().ok_or_else(|| ParseError {
+            message: "演算子の右辺が見つかりません".to_string(),
+        })?;
+        let rhs = parse_operand(rhs_pair)?;
+        expr = Expr::BinOp {
+            op,
+            lhs: Box::new(expr),
+            rhs: Box::new(rhs),
+        };
+    }
+
+    Ok(expr)
 }
 
-fn parse_primary(pair: Pair<Rule>) -> Result<Expr> {
-    let inner = pair
-        .into_inner()
-        .next()
-        .ok_or_else(|| ParseError {
-            message: "primary が空です".to_string(),
-        })?;
+fn parse_expression(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression1, |_| BinOp::Or)
+}
+
+fn parse_expression1(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression2, |_| BinOp::And)
+}
+
+fn parse_expression2(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression3, |_| BinOp::BitOr)
+}
+
+fn parse_expression3(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression4, |_| BinOp::Xor)
+}
+
+fn parse_expression4(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression5, |_| BinOp::BitAnd)
+}
+
+fn parse_expression5(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression6, |s| match s {
+        "==" => BinOp::Eq,
+        "!=" => BinOp::Neq,
+        _ => unreachable!("eq_op は == か != のみ"),
+    })
+}
+
+fn parse_expression6(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression7, |s| match s {
+        "<=" => BinOp::Le,
+        "<" => BinOp::Lt,
+        ">=" => BinOp::Ge,
+        ">" => BinOp::Gt,
+        _ => unreachable!("rel_op は <=, <, >=, > のみ"),
+    })
+}
+
+fn parse_expression7(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression8, |s| match s {
+        "<<<" => BinOp::AShl,
+        "<<" => BinOp::Shl,
+        ">>>" => BinOp::AShr,
+        ">>" => BinOp::Shr,
+        _ => unreachable!("shift_op は <<<, <<, >>>, >> のみ"),
+    })
+}
+
+fn parse_expression8(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression9, |s| match s {
+        "+" => BinOp::Add,
+        "-" => BinOp::Sub,
+        _ => unreachable!("add_op は + か - のみ"),
+    })
+}
+
+fn parse_expression9(pair: Pair<Rule>) -> Result<Expr> {
+    parse_left_assoc(pair, parse_expression_factor, |s| match s {
+        "*" => BinOp::Mul,
+        "/" => BinOp::Div,
+        "%" => BinOp::Mod,
+        _ => unreachable!("mul_op は *, /, % のみ"),
+    })
+}
+
+fn parse_expression_factor(pair: Pair<Rule>) -> Result<Expr> {
+    let inner = pair.into_inner().next().ok_or_else(|| ParseError {
+        message: "式の項が見つかりません".to_string(),
+    })?;
 
     match inner.as_rule() {
         Rule::ident => {
@@ -188,8 +258,9 @@ fn parse_primary(pair: Pair<Rule>) -> Result<Expr> {
                 })?;
             Ok(Expr::Number(n))
         }
+        Rule::expression => parse_expression(inner),
         _ => Err(ParseError {
-            message: format!("primary の内部に予期しないルール: {:?}", inner.as_rule()),
+            message: format!("式の項として予期しないルール: {:?}", inner.as_rule()),
         }),
     }
 }

@@ -25,9 +25,21 @@ Netlist (信号DAG)
 program     = block+
 block       = "{" (decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
-stmt        = ident ("=" | "<=") expr ";"
-expr        = primary ("^" primary)?
-primary     = ident | number
+stmt        = ident ("=" | "<=") expression ";"
+
+# 演算子優先順位チェーン（上ほど優先度が低い）
+expression        = expression1 ("||" expression1)*
+expression1       = expression2 ("&&" expression2)*
+expression2       = expression3 ("|" expression3)*
+expression3       = expression4 ("^" expression4)*
+expression4       = expression5 ("&" expression5)*
+expression5       = expression6 (("==" | "!=") expression6)*
+expression6       = expression7 (("<=" | "<" | ">=" | ">") expression7)*
+expression7       = expression8 (("<<<" | "<<" | ">>>" | ">>") expression8)*
+expression8       = expression9 (("+" | "-") expression9)*
+expression9       = expression_factor (("*" | "/" | "%") expression_factor)*
+expression_factor = ident | number | "(" expression ")"
+
 ident       = [a-zA-Z_][a-zA-Z0-9_]*
 number      = [0-9]+
 ```
@@ -38,7 +50,17 @@ number      = [0-9]+
 - `var x: bit<N>` — Nビットの信号 x を宣言
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
-- `a ^ b` — ビット単位 XOR
+- 演算子（優先度が高い順）:
+  1. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
+  2. `+` `-` — 加算・減算（u64のラップアラウンドで近似）
+  3. `<<` `>>` `<<<` `>>>` — 論理/算術シフト（現状は同じ動作。シフト量が64以上は0を返す）
+  4. `<` `<=` `>` `>=` — 大小比較（結果は1ビットの真偽値）
+  5. `==` `!=` — 等値比較（結果は1ビットの真偽値）
+  6. `&` — ビット単位 AND
+  7. `^` — ビット単位 XOR
+  8. `|` — ビット単位 OR
+  9. `&&` — 論理 AND（結果は1ビットの真偽値）
+  10. `||` — 論理 OR（結果は1ビットの真偽値）
 
 ## サンプル
 
@@ -127,10 +149,9 @@ number      = [0-9]+
 `BinOp` (enum) :
 
 - 役割: 二項演算子の種類。
-- バリアント:
-  - `Xor` — ビット単位 XOR（`^`）
+- バリアント: `Or`(`||`) `And`(`&&`) `BitOr`(`|`) `Xor`(`^`) `BitAnd`(`&`) `Eq`(`==`) `Neq`(`!=`) `Lt`(`<`) `Le`(`<=`) `Gt`(`>`) `Ge`(`>=`) `Shl`(`<<`) `Shr`(`>>`) `AShl`(`<<<`) `AShr`(`>>>`) `Add`(`+`) `Sub`(`-`) `Mul`(`*`) `Div`(`/`) `Mod`(`%`)
 
-- `Display` 実装: `Xor` → `"^"`
+- `Display` 実装: 各バリアントを対応する演算子記号に変換する（上記カッコ内の記号）
 
 ---
 
@@ -179,22 +200,43 @@ number      = [0-9]+
 `parse_stmt(pair: Pair<Rule>) -> Result<Stmt>` :
 
 - 概要: `stmt` ルールのペアから `Stmt` を構築。
-- 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::expr` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
+- 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::expression` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-`parse_expr(pair: Pair<Rule>) -> Result<Expr>` :
+`parse_left_assoc(pair, parse_operand, op_from_str) -> Result<Expr>` :
 
-- 概要: `expr` ルールのペアから `Expr` を構築。
-- 処理: `primary ("^" primary)*` のフラットなリストを左結合の `BinOp::Xor` 木に折り畳む。
+- 概要: `operand (op operand)*` の形をした優先順位チェーンの1段を、左結合の `Expr::BinOp` 木に組み立てる共通ヘルパー。9段ある `expression`〜`expression9` はすべてこの関数を呼ぶだけの薄いラッパーになっている。
+- 引数:
+  - `parse_operand` — 1つ下の優先順位のペアを解決する関数（例: `parse_expression2`）
+  - `op_from_str` — 演算子ルール（`or_op`/`eq_op`など）の一致文字列（`as_str()`）から `BinOp` バリアントへ変換する関数
+- 処理: 最初のオペランドを解決し、以降 `(演算子, オペランド)` の組が続く限り左結合で `Expr::BinOp` に畳み込む。
 
-`parse_primary(pair: Pair<Rule>) -> Result<Expr>` :
+`parse_expression`〜`parse_expression9(pair: Pair<Rule>) -> Result<Expr>` :
 
-- 概要: `primary` ルールのペアから `Expr::Ident` または `Expr::Number` を構築。
-- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`、`Rule::number` → `Number(value)`。識別子は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
+- 概要: 文法の優先順位チェーン（`expression`〜`expression9`）に1対1対応する9つの関数。すべて `parse_left_assoc` に、1つ下の段の解析関数と演算子変換関数を渡すだけ。
+- 対応表（上ほど優先度が低い）:
+
+  | 関数 | 演算子ルール | 演算子 → BinOp |
+  |---|---|---|
+  | `parse_expression` | `or_op` | `\|\|` → `Or` |
+  | `parse_expression1` | `and_op` | `&&` → `And` |
+  | `parse_expression2` | `bitor_op` | `\|` → `BitOr` |
+  | `parse_expression3` | `xor_op` | `^` → `Xor` |
+  | `parse_expression4` | `bitand_op` | `&` → `BitAnd` |
+  | `parse_expression5` | `eq_op` | `==`→`Eq`, `!=`→`Neq` |
+  | `parse_expression6` | `rel_op` | `<=`→`Le`, `<`→`Lt`, `>=`→`Ge`, `>`→`Gt` |
+  | `parse_expression7` | `shift_op` | `<<<`→`AShl`, `<<`→`Shl`, `>>>`→`AShr`, `>>`→`Shr` |
+  | `parse_expression8` | `add_op` | `+`→`Add`, `-`→`Sub` |
+  | `parse_expression9` | `mul_op` | `*`→`Mul`, `/`→`Div`, `%`→`Mod` |
+
+`parse_expression_factor(pair: Pair<Rule>) -> Result<Expr>` :
+
+- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`、または括弧で囲まれた `Expr`（`expression` を再帰的に解決）を構築する。
+- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::expression` → `parse_expression` を再帰呼び出し（括弧の中身）。
 
 `is_keyword(s: &str) -> bool` :
 
 - 概要: 文字列がキーワード（`var` / `bit`）かどうかを判定する。
-- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit` も識別子として受理できてしまう）ため、`parse_decl`・`parse_stmt`・`parse_primary` の3箇所で識別子を確定させるたびにこの関数でキーワードを弾き、変数名としての使用を防いでいる。
+- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit` も識別子として受理できてしまう）ため、`parse_decl`・`parse_stmt`・`parse_expression_factor` の3箇所で識別子を確定させるたびにこの関数でキーワードを弾き、変数名としての使用を防いでいる。
 
 ### 文法ファイル: `grammar.pest`
 
@@ -206,17 +248,41 @@ number      = [0-9]+
 program = { block+ }
 block   = { "{" ~ (decl | stmt)* ~ "}" }
 decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
-stmt    = { ident ~ (assign | nonblock) ~ expr ~ ";" }
+stmt    = { ident ~ (assign | nonblock) ~ expression ~ ";" }
 assign  = { "=" }
 nonblock= { "<=" }
-expr    = { primary ~ ("^" ~ primary)* }
-primary = { ident | number }
+expression        = { expression1 ~ (or_op ~ expression1)* }
+expression1       = { expression2 ~ (and_op ~ expression2)* }
+expression2       = { expression3 ~ (bitor_op ~ expression3)* }
+expression3       = { expression4 ~ (xor_op ~ expression4)* }
+expression4       = { expression5 ~ (bitand_op ~ expression5)* }
+expression5       = { expression6 ~ (eq_op ~ expression6)* }
+expression6       = { expression7 ~ (rel_op ~ expression7)* }
+expression7       = { expression8 ~ (shift_op ~ expression8)* }
+expression8       = { expression9 ~ (add_op ~ expression9)* }
+expression9       = { expression_factor ~ (mul_op ~ expression_factor)* }
+expression_factor = { ident | number | "(" ~ expression ~ ")" }
+
+or_op     = { "||" }
+and_op    = { "&&" }
+bitor_op  = { "|" }
+xor_op    = { "^" }
+bitand_op = { "&" }
+eq_op     = { "==" | "!=" }
+rel_op    = { "<=" | "<" | ">=" | ">" }
+shift_op  = { "<<<" | "<<" | ">>>" | ">>" }
+add_op    = { "+" | "-" }
+mul_op    = { "*" | "/" | "%" }
 
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 ```
+
+- 演算子は個別ルール（`or_op`/`eq_op`など）でラップしている。pestでは無名の文字列リテラルは子Pairにならないため、`("+" | "-")`のように選択肢が複数ある演算子はラップしないとどちらが一致したか判別できない。
+- 各優先順位ルールは `(op ~ next)*` の繰り返し形にしている。単に `next ~ op ~ next`（1回だけ）にすると、演算子を含まない単項の式や3項以上の連鎖がパースできなくなる。
+- `rel_op`/`shift_op` は選択肢の順序が重要。PEGの選択はバックトラックせず最初に一致したものを採用するため、`"<"` を `"<="` より先に書くと `<=` の `=` が読めずに壊れる。長い演算子を先に置く必要がある（例: `"<="` の後に `"<"`）。
 
 - `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
 - `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
@@ -420,7 +486,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_read_signal(&mut self, signal_id, name, width) -> NodeId` — 信号読み出しノードを生成
   - `make_binop(&mut self, op, lhs, rhs, width) -> NodeId` — 二項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind) -> NodeId` — 駆動ノードを生成
-  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築
+  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
 ### 関数
@@ -452,7 +518,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   --- Nodes ---
     N  0: Read(b)  (1 bit)
     N  1: Const(1)  (1 bit)
-    N  2: Xor  (1 bit)  = N0 ^ N1
+    N  2: BinOp(^)  (1 bit)  = N0 ^ N1
     N  3: Drive(a)  (blocking)  <= N2
     N  4: Read(a)  (1 bit)
     N  5: Drive(b)  (non-blocking)  <= N4
@@ -524,8 +590,19 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 処理:
   - `Const` → 保持している定数値を返す
   - `ReadSignal` → `signal_values` から該当信号の値を返す
-  - `BinOp(Xor)` → 左右の子ノードを再帰評価して XOR をとる
+  - `BinOp` → 左右の子ノードを再帰評価し、`eval_binop` で演算子を適用する
   - `Drive` → ソースノードを再帰評価して返す（値をそのまま中継）
+
+`eval_binop(op: BinOp, l: u64, r: u64) -> u64` :
+
+- 概要: 二項演算子を実際の `u64` 計算に適用する。
+- 処理:
+  - `Or`/`And` → 真偽値（`!= 0`）同士の論理演算、結果は0か1
+  - `BitOr`/`Xor`/`BitAnd` → ビット単位の演算
+  - `Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge` → 比較結果を0か1で返す
+  - `Shl`/`AShl`、`Shr`/`AShr` → `checked_shl`/`checked_shr`。シフト量が64以上ならNoneになるため0を返す（現状 `<<<`/`>>>` と `<<`/`>>` は同じ動作。この言語に符号付き型が無いため算術/論理シフトの区別を実装していない）
+  - `Add`/`Sub`/`Mul` → `wrapping_*` でオーバーフローを丸める（幅マスキング未実装のため u64 のラップアラウンドで近似）
+  - `Div`/`Mod` → `checked_div`/`checked_rem`。0除算は未定義値（'x'）が無いため0を返す
 
 `format_waveform(snapshots: &[CycleSnapshot], signals: &[NetlistSignal]) -> String` :
 
@@ -607,7 +684,8 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 
 | 追加したい機能                        | 変更するファイル                                                                                                           |
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| 新しい演算子（&, \|, +, -）           | `ast.rs` (BinOp), `grammar.pest` (exprルール), `parser.rs` (parse_expr), `netlist.rs` (format), `simulator.rs` (eval_node) |
+| 単項演算子（`!`, `~`, `-`）           | `ast.rs` (Expr::UnaryOp 追加), `grammar.pest` (expression_factorに前置演算子), `parser.rs`, `netlist.rs`, `simulator.rs`   |
+| 三項演算子（`cond ? a : b`）          | `ast.rs` (Expr 拡張), `grammar.pest` (expressionの最上位に追加), `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`     |
 | ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs`                                                       |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |
