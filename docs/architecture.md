@@ -1,4 +1,5 @@
-# Tiny Cerilte — アーキテクチャドキュメント
+__Tiny Cerilte — アーキテクチャドキュメント__
+
 
 tinycerilte は最小の HDL シミュレータ。入出力は以下。
 
@@ -16,9 +17,9 @@ Netlist (信号DAG)
 
 ---
 
-## 言語仕様 (Language)
+# 言語仕様 (Language)
 
-### 文法 (EBNF)
+## 文法 (EBNF)
 
 ```
 program     = block+
@@ -31,7 +32,7 @@ ident       = [a-zA-Z_][a-zA-Z0-9_]*
 number      = [0-9]+
 ```
 
-### セマンティクス
+## セマンティクス
 
 - `var x: bit` — 1ビットの信号 x を宣言（初期値 0）
 - `var x: bit<N>` — Nビットの信号 x を宣言
@@ -39,7 +40,7 @@ number      = [0-9]+
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
 - `a ^ b` — ビット単位 XOR
 
-### サンプル
+## サンプル
 
 ```
 {
@@ -55,42 +56,50 @@ number      = [0-9]+
 
 ---
 
-## モジュール一覧
+# モジュール一覧
 
-| モジュール | ファイル | 役割 |
-|---|---|---|
-| `grammar.pest` | `src/grammar.pest` | PEG 文法定義（pest が読み込む） |
-| `ast` | `src/ast.rs` | AST 型定義 |
-| `parser` | `src/parser.rs` | 構文解析（Source → AST, pest ラッパー） |
-| `elaboration` | `src/elaboration.rs` | シンボル解決・型解決 |
-| `netlist` | `src/netlist.rs` | ネットリスト生成（DAG構築） |
-| `simulator` | `src/simulator.rs` | シミュレーション実行 |
-| `main` | `src/main.rs` | CLI エントリポイント |
+| モジュール     | ファイル             | 役割                                     |
+|----------------|----------------------|------------------------------------------|
+| `grammar.pest` | `src/grammar.pest`   | PEG 文法定義（pest が読み込む）          |
+| `ast`          | `src/ast.rs`         | AST 型定義                               |
+| `parser`       | `src/parser.rs`      | 構文解析（Source → AST, pest ラッパー） |
+| `elaboration`  | `src/elaboration.rs` | シンボル解決・型解決                     |
+| `netlist`      | `src/netlist.rs`     | ネットリスト生成（DAG構築）              |
+| `simulator`    | `src/simulator.rs`   | シミュレーション実行                     |
+| `main`         | `src/main.rs`        | CLI エントリポイント                     |
 
 ---
 
-## データ構造詳細
+# モジュール詳細
 
-### `ast` モジュール
+各モジュールを「型（データ）」と「関数（処理）」に分けて説明する。
 
-#### `Program`
+## `ast` モジュール
+
+### 型
+
+`Program` :
+
 - 役割: パース結果のトップレベル。0個以上の Block を持つ。
 - フィールド:
   - `blocks: Vec<Block>` — プログラム中のブロックのリスト
 
-#### `Block`
+`Block` :
+
 - 役割: `{ ... }` で囲まれた1つのスコープ。宣言と代入文の列。
 - フィールド:
   - `decls: Vec<Decl>` — 変数宣言のリスト
   - `stmts: Vec<Stmt>` — 代入文のリスト
 
-#### `Decl`
+`Decl` :
+
 - 役割: `var name: bit<N>;` による変数宣言。
 - フィールド:
   - `name: String` — 変数名
   - `width: Option<u64>` — ビット幅。`None` = `bit`（1ビット）、`Some(n)` = `bit<n>`（Nビット）
 
-#### `Stmt` (enum)
+`Stmt` (enum) :
+
 - 役割: 代入文。代入演算子でバリアントが分かれる。
 - バリアント:
   - `Combinational { target: String, expr: Expr }` — `target = expr`
@@ -104,7 +113,8 @@ number      = [0-9]+
   - `target(&self) -> &str` — 代入先の変数名を返す
   - `expr(&self) -> &Expr` — 右辺の式への参照を返す
 
-#### `Expr` (enum)
+`Expr` (enum) :
+
 - 役割: 式。右辺の計算を表す木構造。
 - バリアント:
   - `Ident(String)` — 変数参照（例: `a`）
@@ -114,7 +124,8 @@ number      = [0-9]+
     - `lhs` — 左辺の式
     - `rhs` — 右辺の式
 
-#### `BinOp` (enum)
+`BinOp` (enum) :
+
 - 役割: 二項演算子の種類。
 - バリアント:
   - `Xor` — ビット単位 XOR（`^`）
@@ -123,57 +134,69 @@ number      = [0-9]+
 
 ---
 
-### `parser` モジュール
+## `parser` モジュール
 
-#### `ParseError`
+### 型
+
+`ParseError` :
+
 - 役割: 構文解析エラー（pest のエラーをラップ）。
 - フィールド:
   - `message: String` — エラーメッセージ
 
 - `Display` 実装: `"パースエラー: <message>"`
 
-#### `CeriteParser`
+`CeriteParser` :
+
 - 役割: pest の derive マクロで `grammar.pest` から自動生成されたパーサー。
 - `pest_derive::Parser` を継承し、`pest::Parser` trait の `parse()` メソッドを実装する。
 
-#### `Parser`
+`Parser` :
+
 - 役割: pest パーサーのラッパー。公開 API を提供する。
 - フィールド: なし（ユニット構造体）
 
-##### `Parser::parse_program(input: &str) -> Result<Program>`
+### 関数
+
+`Parser::parse_program(input: &str) -> Result<Program>` :
+
 - 概要: 入力文字列をパースし、`Program` を返す。
 - 処理:
   1. `CeriteParser::parse(Rule::program, input)` を呼び、pest の `Pairs` を得る
   2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` を抽出
   3. 各ブロックを `parse_block()` で AST に変換
 
-#### 内部関数（pest の `Pair<Rule>` → AST 変換）
+`parse_block(pair: Pair<Rule>) -> Result<Block>` :
 
-##### `parse_block(pair: Pair<Rule>) -> Result<Block>`
 - 概要: `block` ルールのペアから `Block` を構築。
 - 処理: 子ペアを走査し、`Rule::decl` → `parse_decl()`、`Rule::stmt` → `parse_stmt()` に振り分け。
 
-##### `parse_decl(pair: Pair<Rule>) -> Result<Decl>`
+`parse_decl(pair: Pair<Rule>) -> Result<Decl>` :
+
 - 概要: `decl` ルールのペアから `Decl` を構築。
 - 処理: 子ペアから `Rule::ident` → 変数名、`Rule::number` → ビット幅（存在すれば）を抽出。変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `parse_stmt(pair: Pair<Rule>) -> Result<Stmt>`
+`parse_stmt(pair: Pair<Rule>) -> Result<Stmt>` :
+
 - 概要: `stmt` ルールのペアから `Stmt` を構築。
 - 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::expr` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `parse_expr(pair: Pair<Rule>) -> Result<Expr>`
+`parse_expr(pair: Pair<Rule>) -> Result<Expr>` :
+
 - 概要: `expr` ルールのペアから `Expr` を構築。
 - 処理: `primary ("^" primary)*` のフラットなリストを左結合の `BinOp::Xor` 木に折り畳む。
 
-##### `parse_primary(pair: Pair<Rule>) -> Result<Expr>`
+`parse_primary(pair: Pair<Rule>) -> Result<Expr>` :
+
 - 概要: `primary` ルールのペアから `Expr::Ident` または `Expr::Number` を構築。
 - 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`、`Rule::number` → `Number(value)`。識別子は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
 
-##### `is_keyword(s: &str) -> bool`
+`is_keyword(s: &str) -> bool` :
+
 - 概要: 文字列がキーワード（`var` / `bit`）かどうかを判定する。
 - 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit` も識別子として受理できてしまう）ため、`parse_decl`・`parse_stmt`・`parse_primary` の3箇所で識別子を確定させるたびにこの関数でキーワードを弾き、変数名としての使用を防いでいる。
 
-#### 文法ファイル: `grammar.pest`
+### 文法ファイル: `grammar.pest`
 
 - 場所: `src/grammar.pest`
 - 役割: PEG 文法の定義ファイル。`pest_derive` がビルド時に読み込んで `CeriteParser` を生成する。
@@ -202,21 +225,26 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 ---
 
-### `elaboration` モジュール
+## `elaboration` モジュール
 
-#### `ElabError`
+### 型
+
+`ElabError` :
+
 - 役割: エラボレーションエラー（未宣言変数、重複宣言など）。
 - フィールド:
   - `message: String` — 日本語のエラーメッセージ
 
-#### `ResolvedSignal`
+`ResolvedSignal` :
+
 - 役割: 解決済みの信号定義。パース時の `Decl` から変数名をシンボルテーブルで ID に変換したもの。
 - フィールド:
   - `name: String` — 変数名（元のソースの名前）
   - `width: u64` — ビット幅（`bit` = 1、`bit<N>` = N）
   - `id: usize` — 信号ID（0始まりの通番）
 
-#### `ResolvedStmt` (enum)
+`ResolvedStmt` (enum) :
+
 - 役割: 解決済みの代入文。変数名が ID に置き換わっている。
 - バリアント:
   - `Combinational { target_id: usize, expr: ResolvedExpr }` — 組み合わせ代入
@@ -224,24 +252,34 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     - `expr` — 右辺の解決済み式
   - `Sequential { target_id: usize, expr: ResolvedExpr }` — 順序代入
 
-#### `ResolvedExpr` (enum)
+`ResolvedExpr` (enum) :
+
 - 役割: 解決済みの式。変数参照が ID に置き換わっている。
 - バリアント:
   - `Ident(usize)` — 信号ID参照
   - `Number(u64)` — 数値リテラル
   - `BinOp { op: BinOp, lhs: Box<ResolvedExpr>, rhs: Box<ResolvedExpr> }` — 二項演算
 
-#### `Elaborated`
+`Elaborated` :
+
 - 役割: エラボレーション結果全体。
 - フィールド:
   - `signals: Vec<ResolvedSignal>` — 全信号のリスト
   - `stmts: Vec<ResolvedStmt>` — 全代入文の解決後リスト
 
-#### `SymbolTable` (type alias)
+`SymbolTable` (type alias) :
+
 - 定義: `HashMap<String, usize>`
 - 役割: 変数名 → 信号ID のマッピング。エラボレーション中に一時的に構築される。
 
-#### `elaborate(prog: &Program) -> Result<Elaborated>`
+`WHITE` / `GRAY` / `BLACK` (定数, `u8`) :
+
+- 役割: `dfs_visit` のDFS色付け（未訪問/探索中/探索済み）に使う定数。`check_combinational_loops` と `dfs_visit` の双方から参照するためファイルスコープに定義されている。
+
+### 関数
+
+`elaborate(prog: &Program) -> Result<Elaborated>` :
+
 - 概要: AST を受け取り、`build_*` で宣言・文を解決したあと `check_*` を順に適用し、解決済みIR を返す。
 - 処理:
   1. `build_signals` で宣言からシンボルテーブルと信号リストを構築
@@ -250,51 +288,57 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   4. `check_combinational_loops` で組合せ代入間の循環依存を検出
 - 備考: チェックを追加する場合は同じ形の `check_*` 関数を書き、`elaborate()` に1行足すだけでよい（配列やtraitによる登録機構は導入していない）。
 
-#### `build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>`
+`build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>` :
+
 - 概要: 全ブロックの宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。
 - 処理: 重複チェック（同名変数があればエラー）、シンボルテーブル（名前→ID）の構築、`ResolvedSignal` のリスト作成（`width` のデフォルトは1）
 
-#### `resolve_stmts(prog: &Program, symtab: &SymbolTable) -> Result<Vec<ResolvedStmt>>`
+`resolve_stmts(prog: &Program, symtab: &SymbolTable) -> Result<Vec<ResolvedStmt>>` :
+
 - 概要: 全ブロックの代入文を走査し、変数名をシンボルIDに解決する。
 - 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`）、代入の種類（Combinational/Sequential）を保持
 
-#### `check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>`
+`check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :
+
 - 概要: 同一信号への複数ドライバ（多重代入）を検出する。
 - 処理: `HashSet` に `target_id` を挿入していき、既に挿入済みの ID が再度出てきたらエラー（信号名は `signals[target_id].name` から引く）
 
-#### `resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr>`
+`resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr>` :
+
 - 概要: AST の式を再帰的に解決済み式に変換する。
 - 処理:
   - `Ident(name)` → シンボルテーブルで ID に解決
   - `Number(n)` → そのまま
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
 
-#### `WHITE` / `GRAY` / `BLACK` (定数, `u8`)
-- 役割: `dfs_visit` のDFS色付け（未訪問/探索中/探索済み）に使う定数。`check_combinational_loops` と `dfs_visit` の双方から参照するためファイルスコープに定義されている。
+`check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :
 
-#### `check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>`
 - 概要: 組合せ代入（Combinational）だけを対象に依存グラフを作り、循環がないか検査する。順序代入（Sequential）は1サイクル遅れて反映されるため依存グラフに含めない（循環があってもループにならない）。
 - 処理:
   1. `build_combinational_deps` で依存グラフを構築
   2. 全信号を色 `WHITE` で初期化
   3. 未訪問（`WHITE`）の信号ごとに `dfs_visit` を呼ぶ
 
-#### `build_combinational_deps(stmts: &[ResolvedStmt], signal_count: usize) -> Vec<Vec<usize>>`
+`build_combinational_deps(stmts: &[ResolvedStmt], signal_count: usize) -> Vec<Vec<usize>>` :
+
 - 概要: 組合せ代入の依存グラフを構築する。
 - 処理: `deps[信号ID] = その信号を右辺で読む Combinational Drive のターゲットID一覧`（`collect_read_signals` で各文の右辺から読み取り信号を収集）
 
-#### `dfs_visit(node: usize, deps: &[Vec<usize>], color: &mut [u8], path: &mut Vec<usize>, signals: &[ResolvedSignal]) -> Result<()>`
+`dfs_visit(node: usize, deps: &[Vec<usize>], color: &mut [u8], path: &mut Vec<usize>, signals: &[ResolvedSignal]) -> Result<()>` :
+
 - 概要: 依存グラフをDFSで訪問し、循環を検出する（経路を `path` に保持する）。
 - 処理:
   1. 白（未訪問）・灰（探索中）・黒（探索済み）で色付けしながら再帰的にDFS
   2. 探索中（灰）のノードに戻る辺を見つけたら `cycle_error` でエラーを組み立てて返す
   3. 未訪問（白）のノードへは再帰的に `dfs_visit` を呼ぶ
 
-#### `cycle_error(path: &[usize], next: usize, signals: &[ResolvedSignal]) -> ElabError`
+`cycle_error(path: &[usize], next: usize, signals: &[ResolvedSignal]) -> ElabError` :
+
 - 概要: `dfs_visit` が循環を検出した際、経路を含むエラーメッセージを組み立てる。
 - 処理: `path` から循環の開始位置を探し、そこから `next` までの信号名を `→` で連結してメッセージ化
 
-#### `collect_read_signals(expr: &ResolvedExpr) -> Vec<usize>`
+`collect_read_signals(expr: &ResolvedExpr) -> Vec<usize>` :
+
 - 概要: 解決済み式が右辺で参照している信号IDを再帰的に集める（`build_combinational_deps` の依存グラフ構築に使用）。
 - 処理:
   - `Ident(id)` → `[id]`
@@ -303,13 +347,17 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 ---
 
-### `netlist` モジュール
+## `netlist` モジュール
 
-#### `NodeId` (type alias)
+### 型
+
+`NodeId` (type alias) :
+
 - 定義: `usize`
 - 役割: ネットリストノードの識別子（`nodes` ベクタのインデックス）
 
-#### `Node` (enum)
+`Node` (enum) :
+
 - 役割: ネットリストを構成するノード。計算の単位。
 - バリアント:
   - `Const { id: NodeId, value: u64, width: u64 }` — 定数
@@ -331,7 +379,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     - `source` — 駆動値のソースノードID
     - `kind` — 駆動の種類（Combinational/Sequential）
 
-#### `DriveKind` (enum)
+`DriveKind` (enum) :
+
 - 役割: 信号駆動の種類。
 - バリアント:
   - `Combinational` — 組み合わせ（`=`、即時反映）
@@ -339,13 +388,15 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 - `Display` 実装: `Combinational` → `"blocking"`, `Sequential` → `"non-blocking"`
 
-#### `Netlist`
+`Netlist` :
+
 - 役割: 生成されたネットリスト全体。
 - フィールド:
   - `signals: Vec<NetlistSignal>` — 全信号のリスト
   - `nodes: Vec<Node>` — 全ノードのリスト（DAG の頂点集合）
 
-#### `NetlistSignal`
+`NetlistSignal` :
+
 - 役割: ネットリスト上の信号情報。
 - フィールド:
   - `id: usize` — 信号ID
@@ -354,7 +405,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `driver_node: Option<NodeId>` — この信号を駆動する Drive ノードのID（未駆動 = None）
   - `driver_kind: Option<DriveKind>` — 駆動の種類（未駆動 = None）
 
-#### `NetlistBuilder`
+`NetlistBuilder` :
+
 - 役割: 内部ビルダー。ノードを生成・追加しながら Netlist を構築する。
 - フィールド:
   - `nodes: Vec<Node>` — 構築中のノードリスト
@@ -371,7 +423,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
-#### `build_netlist(elab: &Elaborated) -> Netlist`
+### 関数
+
+`build_netlist(elab: &Elaborated) -> Netlist` :
+
 - 概要: エラボレーション結果からネットリストを生成する。
 - 処理:
   1. `Elaborated.signals` から `NetlistSignal` のリストを作成（driver情報は初期化時点では None）
@@ -381,7 +436,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
      - 対応する信号の `driver_node`/`driver_kind` を更新
   3. `Netlist { signals, nodes }` を返す
 
-#### `format_netlist(nl: &Netlist) -> String`
+`format_netlist(nl: &Netlist) -> String` :
+
 - 概要: ネットリストを人間が読めるテキスト形式に整形する。
 - 出力例:
   ```
@@ -404,34 +460,45 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 ---
 
-### `simulator` モジュール
+## `simulator` モジュール
 
-#### `CycleSnapshot`
+### 型
+
+`CycleSnapshot` :
+
 - 役割: 1サイクル分のシミュレーション結果。
 - フィールド:
   - `cycle: u64` — サイクル番号（0始まり）
   - `values: Vec<u64>` — 各信号の値（信号ID順、インデックス = 信号ID）
 
-#### `Simulator`
+`Simulator` :
+
 - 役割: ネットリストを評価して波形を生成する。
 - フィールド:
   - `signal_values: Vec<u64>` — 現在の各信号の値（信号ID順）
   - `cycle: u64` — 経過サイクル数
 
-##### `Simulator::new(signal_count: usize) -> Self`
+### 関数
+
+`Simulator::new(signal_count: usize) -> Self` :
+
 - 概要: 全信号を0で初期化したシミュレーターを生成する。
 - 引数: `signal_count` — 信号の数
 
-##### `Simulator::set_signal(&mut self, id: usize, value: u64)`
+`Simulator::set_signal(&mut self, id: usize, value: u64)` :
+
 - 概要: 特定の信号に初期値を設定する（step() 実行前に呼ぶ）。
 
-##### `Simulator::signal_values(&self) -> &[u64]`
+`Simulator::signal_values(&self) -> &[u64]` :
+
 - 概要: 現在の全信号値をスライスで返す。
 
-##### `Simulator::cycle(&self) -> u64`
+`Simulator::cycle(&self) -> u64` :
+
 - 概要: 現在のサイクル数を返す。
 
-##### `Simulator::step(&mut self, nodes: &[Node]) -> CycleSnapshot`
+`Simulator::step(&mut self, nodes: &[Node]) -> CycleSnapshot` :
+
 - 概要: 1サイクル分シミュレーションを進め、結果のスナップショットを返す。
 - 処理:
   1. スナップショット取得: サイクル開始時の全信号値をクローンする（ノンブロッキング参照用）
@@ -445,12 +512,14 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
      - `next` → `signal_values` に一斉コミット
   4. サイクルカウンタを進め、`CycleSnapshot` を返す
 
-##### `Simulator::run(&mut self, nodes: &[Node], cycles: u64) -> Vec<CycleSnapshot>`
+`Simulator::run(&mut self, nodes: &[Node], cycles: u64) -> Vec<CycleSnapshot>` :
+
 - 概要: Nサイクル連続で実行し、全スナップショットを返す。
 - 引数: `cycles` — 実行するサイクル数
 - 返り値: `Vec<CycleSnapshot>` — サイクル0〜N-1 のスナップショット
 
-#### `eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64`
+`eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64` :
+
 - 概要: ノードID を指定して、そのノードの出力値を再帰的に計算する。
 - 処理:
   - `Const` → 保持している定数値を返す
@@ -458,7 +527,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `BinOp(Xor)` → 左右の子ノードを再帰評価して XOR をとる
   - `Drive` → ソースノードを再帰評価して返す（値をそのまま中継）
 
-#### `format_waveform(snapshots: &[CycleSnapshot], signals: &[NetlistSignal]) -> String`
+`format_waveform(snapshots: &[CycleSnapshot], signals: &[NetlistSignal]) -> String` :
+
 - 概要: シミュレーション結果を見やすいテキスト波形表に整形する。
 - 出力例:
   ```
@@ -472,7 +542,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 ---
 
-## CLI 使用方法
+# CLI 使用方法
 
 ```bash
 # サンプルコードを実行（ネットリスト表示まで）
@@ -486,17 +556,17 @@ cargo run -- path/to/file.tc --cycles 10
 cargo run -- --cycles 6   # サンプルコードを6サイクル
 ```
 
-### オプション
+## オプション
 
-| 引数 | 説明 |
-|---|---|
+| 引数                 | 説明                                  |
+|----------------------|---------------------------------------|
 | `--cycles N`, `-c N` | シミュレーションを N サイクル実行する |
 
 ---
 
-## シミュレーションモデル
+# シミュレーションモデル
 
-### 1サイクルの動作
+## 1サイクルの動作
 
 ```
 サイクル開始 (signal_values = 現在値)
@@ -517,7 +587,7 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
   └─ cycle++、結果出力
 ```
 
-### ノンブロッキング代入の動作
+## ノンブロッキング代入の動作
 
 `b <= a` の例:
 
@@ -531,14 +601,14 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 
 ---
 
-## 拡張ポイント
+# 拡張ポイント
 
 現在のアーキテクチャで新しい機能を追加するときの変更箇所:
 
-| 追加したい機能 | 変更するファイル |
-|---|---|---|
-| 新しい演算子（&, \|, +, -） | `ast.rs` (BinOp), `grammar.pest` (exprルール), `parser.rs` (parse_expr), `netlist.rs` (format), `simulator.rs` (eval_node) |
-| ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs` |
-| if/case 文 | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs` |
-| モジュール・ポート | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決) |
-| VCD ダンプ | `simulator.rs` (format_waveform の代わりに VCD 出力) |
+| 追加したい機能                        | 変更するファイル                                                                                                           |
+|---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| 新しい演算子（&, \|, +, -）           | `ast.rs` (BinOp), `grammar.pest` (exprルール), `parser.rs` (parse_expr), `netlist.rs` (format), `simulator.rs` (eval_node) |
+| ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs`                                                       |
+| if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
+| モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |
+| VCD ダンプ                            | `simulator.rs` (format_waveform の代わりに VCD 出力)                                                                       |
