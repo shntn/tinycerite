@@ -131,3 +131,17 @@ fn division_by_zero_yields_zero_instead_of_panicking() {
     let snap = sim.step(&nodes);
     assert_eq!(snap.values[0], 0, "0除算は未定義値の代わりに0を返す");
 }
+
+#[test]
+fn combinational_assign_masks_value_to_signal_width() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<4>; x = 17; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 1, "17 & 0b1111 = 1（4ビットに切り詰め）");
+}
+
+#[test]
+fn sequential_assign_masks_value_to_signal_width() {
+    let (mut sim, nodes, _) = setup("{ var b: bit<4>; b <= 17; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 1, "17 & 0b1111 = 1（順序代入でも4ビットに切り詰め）");
+}

@@ -38,6 +38,8 @@ pub enum Node {
         signal_name: String,
         source: NodeId,
         kind: DriveKind,
+        /// 駆動先信号のビット幅（代入時のマスキングに使用）
+        width: u64,
     },
 }
 
@@ -136,6 +138,7 @@ impl NetlistBuilder {
         signal_name: &str,
         source: NodeId,
         kind: DriveKind,
+        width: u64,
     ) -> NodeId {
         let id = self.alloc_id();
         self.add_node(Node::Drive {
@@ -144,6 +147,7 @@ impl NetlistBuilder {
             signal_name: signal_name.to_string(),
             source,
             kind,
+            width,
         })
     }
 
@@ -181,7 +185,7 @@ impl NetlistBuilder {
             Node::Const { width, .. } => *width,
             Node::ReadSignal { width, .. } => *width,
             Node::BinOp { width, .. } => *width,
-            Node::Drive { .. } => 0, // driveは幅を持たない
+            Node::Drive { width, .. } => *width,
         }
     }
 }
@@ -209,14 +213,14 @@ pub fn build_netlist(elab: &Elaborated) -> Netlist {
             ResolvedStmt::Combinational { target_id, expr } => {
                 let sig = &signals[*target_id];
                 let src = builder.build_expr(expr, &signals);
-                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Combinational);
+                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Combinational, sig.width);
                 signals[*target_id].driver_node = Some(drive);
                 signals[*target_id].driver_kind = Some(DriveKind::Combinational);
             }
             ResolvedStmt::Sequential { target_id, expr } => {
                 let sig = &signals[*target_id];
                 let src = builder.build_expr(expr, &signals);
-                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Sequential);
+                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Sequential, sig.width);
                 signals[*target_id].driver_node = Some(drive);
                 signals[*target_id].driver_kind = Some(DriveKind::Sequential);
             }

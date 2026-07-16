@@ -54,11 +54,12 @@ impl Simulator {
                     signal_id,
                     source,
                     kind: DriveKind::Combinational,
+                    width,
                     ..
                 } = node
                 {
-                    self.signal_values[*signal_id] =
-                        eval_node(*source, nodes, &self.signal_values);
+                    let value = eval_node(*source, nodes, &self.signal_values);
+                    self.signal_values[*signal_id] = mask_to_width(value, *width);
                 }
             }
             if old == self.signal_values {
@@ -82,10 +83,12 @@ impl Simulator {
                 signal_id,
                 source,
                 kind: DriveKind::Sequential,
+                width,
                 ..
             } = node
             {
-                next[*signal_id] = eval_node(*source, nodes, &snapshot);
+                let value = eval_node(*source, nodes, &snapshot);
+                next[*signal_id] = mask_to_width(value, *width);
             }
         }
         self.signal_values = next;
@@ -101,6 +104,15 @@ impl Simulator {
     /// Nサイクル実行し、全スナップショットを返す
     pub fn run(&mut self, nodes: &[Node], cycles: u64) -> Vec<CycleSnapshot> {
         (0..cycles).map(|_| self.step(nodes)).collect()
+    }
+}
+
+/// 値を信号のビット幅に切り詰める（幅が64以上ならそのまま）
+fn mask_to_width(value: u64, width: u64) -> u64 {
+    if width >= 64 {
+        value
+    } else {
+        value & ((1u64 << width) - 1)
     }
 }
 
@@ -121,7 +133,8 @@ fn eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64 {
 /// 二項演算子を適用する
 ///
 /// シフト量が64以上の場合と0除算は、この言語に未定義値('x')が無いため0を返す。
-/// 加減乗算は幅マスキングを行わないため、u64のラップアラウンドで近似している。
+/// 加減乗算はここでは幅マスキングを行わずu64のラップアラウンドで近似する。
+/// 信号への代入時にのみ mask_to_width で宣言幅に切り詰められる。
 fn eval_binop(op: crate::ast::BinOp, l: u64, r: u64) -> u64 {
     use crate::ast::BinOp;
     match op {

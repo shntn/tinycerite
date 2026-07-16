@@ -439,11 +439,12 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     - `lhs` — 左辺のノードID
     - `rhs` — 右辺のノードID
     - `width` — 結果のビット幅
-  - `Drive { id: NodeId, signal_id: usize, signal_name: String, source: NodeId, kind: DriveKind }` — 信号駆動
+  - `Drive { id: NodeId, signal_id: usize, signal_name: String, source: NodeId, kind: DriveKind, width: u64 }` — 信号駆動
     - `signal_id` — 駆動する信号のID
     - `signal_name` — デバッグ用の信号名
     - `source` — 駆動値のソースノードID
     - `kind` — 駆動の種類（Combinational/Sequential）
+    - `width` — 駆動先信号のビット幅（`Simulator::step`が代入時のマスキングに使う）
 
 `DriveKind` (enum) :
 
@@ -485,7 +486,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_const(&mut self, value, width) -> NodeId` — 定数ノードを生成
   - `make_read_signal(&mut self, signal_id, name, width) -> NodeId` — 信号読み出しノードを生成
   - `make_binop(&mut self, op, lhs, rhs, width) -> NodeId` — 二項演算ノードを生成
-  - `make_drive(&mut self, signal_id, name, source, kind) -> NodeId` — 駆動ノードを生成
+  - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
   - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
@@ -569,11 +570,11 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 処理:
   1. スナップショット取得: サイクル開始時の全信号値をクローンする（ノンブロッキング参照用）
   2. Phase 1 — 組み合わせ評価（Δ-サイクル、最大1000回）:
-     - 全コンビネーション Drive ノードを評価し、信号値を即時更新
+     - 全コンビネーション Drive ノードを評価し、`mask_to_width` で駆動先信号の幅に切り詰めてから信号値を即時更新
      - 値が収束するまで（変更がなくなるまで）ループ
      - 1000回の反復で収束しなければ組合せループと判定してパニック
   3. Phase 2 — 順序評価:
-     - 全シーケンシャル Drive ノードを評価（参照する値は Phase 1 開始前のスナップショット）
+     - 全シーケンシャル Drive ノードを評価（参照する値は Phase 1 開始前のスナップショット）、同様に `mask_to_width` で幅に切り詰める
      - 評価結果を `next` 配列に格納
      - `next` → `signal_values` に一斉コミット
   4. サイクルカウンタを進め、`CycleSnapshot` を返す
@@ -583,6 +584,11 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 概要: Nサイクル連続で実行し、全スナップショットを返す。
 - 引数: `cycles` — 実行するサイクル数
 - 返り値: `Vec<CycleSnapshot>` — サイクル0〜N-1 のスナップショット
+
+`mask_to_width(value: u64, width: u64) -> u64` :
+
+- 概要: 値を信号のビット幅に切り詰める（代入時のマスキング）。
+- 処理: `width`が64以上ならそのまま返す（シフトオーバーフロー回避）。それ以外は `value & ((1 << width) - 1)` でビットマスクする。`Simulator::step`のPhase 1・Phase 2の両方で、Driveノードの評価結果に対して呼ばれる。
 
 `eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64` :
 
@@ -601,7 +607,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `BitOr`/`Xor`/`BitAnd` → ビット単位の演算
   - `Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge` → 比較結果を0か1で返す
   - `Shl`/`AShl`、`Shr`/`AShr` → `checked_shl`/`checked_shr`。シフト量が64以上ならNoneになるため0を返す（現状 `<<<`/`>>>` と `<<`/`>>` は同じ動作。この言語に符号付き型が無いため算術/論理シフトの区別を実装していない）
-  - `Add`/`Sub`/`Mul` → `wrapping_*` でオーバーフローを丸める（幅マスキング未実装のため u64 のラップアラウンドで近似）
+  - `Add`/`Sub`/`Mul` → `wrapping_*` でオーバーフローを丸める。式の途中経過（中間の`BinOp`）は信号の幅では切り詰められず、u64のラップアラウンドになる点に注意（信号への代入時にのみ`mask_to_width`で宣言幅に切り詰められる）
   - `Div`/`Mod` → `checked_div`/`checked_rem`。0除算は未定義値（'x'）が無いため0を返す
 
 `format_waveform(snapshots: &[CycleSnapshot], signals: &[NetlistSignal]) -> String` :
