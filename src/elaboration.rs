@@ -163,6 +163,22 @@ fn build_module_defs(prog: &Program) -> Result<HashMap<String, ResolvedModuleDef
 /// モジュール定義を解決する: ポートを信号として登録し、本体の代入文を解決したうえで
 /// 通常のスコープと同じ静的チェックを適用する
 fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
+    let (mut signals, mut symtab, ports) = resolve_module_ports(m)?;
+    resolve_module_decls(m, &mut signals, &mut symtab)?;
+    let stmts = resolve_module_stmts(m, &symtab, &ports)?;
+
+    check_multiple_drivers(&stmts, &signals)?;
+    check_combinational_loops(&stmts, &signals)?;
+
+    Ok(ResolvedModuleDef {
+        name: m.name.clone(),
+        ports,
+        body: ResolvedScope { signals, stmts, instances: Vec::new() },
+    })
+}
+
+/// モジュールのポート宣言を信号として登録する（重複ポート名はエラー）
+fn resolve_module_ports(m: &ModuleDef) -> Result<(Vec<ResolvedSignal>, SymbolTable, Vec<ResolvedPort>)> {
     let mut signals = Vec::new();
     let mut symtab = SymbolTable::new();
     let mut ports = Vec::new();
@@ -180,6 +196,11 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
         ports.push(ResolvedPort { name: p.name.clone(), direction: p.direction, signal_id: id });
     }
 
+    Ok((signals, symtab, ports))
+}
+
+/// モジュール本体の`var`宣言を、ポートと同じ信号空間に追加登録する（重複宣言はエラー）
+fn resolve_module_decls(m: &ModuleDef, signals: &mut Vec<ResolvedSignal>, symtab: &mut SymbolTable) -> Result<()> {
     for decl in &m.decls {
         if symtab.contains_key(&decl.name) {
             return Err(ElabError {
@@ -191,8 +212,13 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
         symtab.insert(decl.name.clone(), id);
         signals.push(ResolvedSignal { name: decl.name.clone(), width, id });
     }
+    Ok(())
+}
 
-    // モジュール本体は現状ネストしたインスタンス化を許可しない（文法上も不可）ため空
+/// モジュール本体の代入文を解決する（入力ポートへの代入はエラー）。
+/// モジュール本体は現状ネストしたインスタンス化を許可しない（文法上も不可）ため、
+/// インスタンステーブル・モジュールテーブルは空で`resolve_expr`に渡す。
+fn resolve_module_stmts(m: &ModuleDef, symtab: &SymbolTable, ports: &[ResolvedPort]) -> Result<Vec<ResolvedStmt>> {
     let instances = InstanceTable::new();
     let empty_modules = HashMap::new();
 
@@ -209,7 +235,7 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
                 message: format!("モジュール '{}': 入力ポート '{}' に代入できません", m.name, target),
             });
         }
-        let expr = resolve_expr(stmt.expr(), &symtab, &instances, &empty_modules)?;
+        let expr = resolve_expr(stmt.expr(), symtab, &instances, &empty_modules)?;
 
         let resolved = match stmt {
             Stmt::Combinational { .. } => ResolvedStmt::Combinational { target_id, expr },
@@ -218,14 +244,7 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
         stmts.push(resolved);
     }
 
-    check_multiple_drivers(&stmts, &signals)?;
-    check_combinational_loops(&stmts, &signals)?;
-
-    Ok(ResolvedModuleDef {
-        name: m.name.clone(),
-        ports,
-        body: ResolvedScope { signals, stmts, instances: Vec::new() },
-    })
+    Ok(stmts)
 }
 
 /// トップレベルのブロック群（とテストベンチの並行部分）を解決する:
