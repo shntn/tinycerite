@@ -145,3 +145,31 @@ fn sequential_assign_masks_value_to_signal_width() {
     let snap = sim.step(&nodes);
     assert_eq!(snap.values[0], 1, "17 & 0b1111 = 1（順序代入でも4ビットに切り詰め）");
 }
+
+#[test]
+fn logical_not_inverts_truthiness() {
+    let (mut sim, nodes, _) = setup("{ var a: bit; var x: bit; a = 0; x = !a; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[1], 1, "!0 は真なので 1");
+}
+
+#[test]
+fn logical_not_of_nonzero_is_zero() {
+    let (mut sim, nodes, _) = setup("{ var a: bit<4>; var x: bit; a = 5; x = !a; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[1], 0, "!5 は偽なので 0");
+}
+
+#[test]
+fn bitwise_not_masks_to_signal_width_at_assignment() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<4>; x = ~0; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 15, "~0 は全ビット1、代入時に4ビットへ切り詰めて15");
+}
+
+#[test]
+fn chained_unary_operators_evaluate_correctly() {
+    let (mut sim, nodes, _) = setup("{ var x: bit; x = !!1; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 1, "!!1 = !0 = 1");
+}

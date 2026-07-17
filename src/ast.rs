@@ -62,6 +62,30 @@ pub enum Expr {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// 単項演算
+    UnaryOp {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+}
+
+/// 単項演算子
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnOp {
+    /// 論理否定
+    Not,
+    /// ビット反転
+    BitNot,
+}
+
+impl fmt::Display for UnOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            UnOp::Not => "!",
+            UnOp::BitNot => "~",
+        };
+        write!(f, "{s}")
+    }
 }
 
 /// 二項演算子

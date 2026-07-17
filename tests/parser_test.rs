@@ -1,4 +1,4 @@
-use tinycerilte::ast::{BinOp, Expr, Stmt};
+use tinycerilte::ast::{BinOp, Expr, Stmt, UnOp};
 use tinycerilte::parser::Parser;
 
 fn parse(input: &str) -> tinycerilte::ast::Program {
@@ -167,5 +167,75 @@ fn all_new_binary_operators_parse_successfully() {
     for op in ops {
         let src = format!("{{ var x: bit; x = 1 {op} 2; }}");
         assert!(Parser::parse_program(&src).is_ok(), "演算子 {op} がパースできる");
+    }
+}
+
+#[test]
+fn unary_not_parses_as_unaryop() {
+    let prog = parse("{ var x: bit; x = !x; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::UnaryOp { op: UnOp::Not, .. }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn unary_bitnot_parses_as_unaryop() {
+    let prog = parse("{ var x: bit; x = ~x; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::UnaryOp { op: UnOp::BitNot, .. }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn chained_unary_operators_nest_right_to_left() {
+    let prog = parse("{ var x: bit; x = !~x; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => match expr {
+            Expr::UnaryOp { op: UnOp::Not, expr } => {
+                assert!(matches!(**expr, Expr::UnaryOp { op: UnOp::BitNot, .. }));
+            }
+            _ => panic!("最外は Not(BitNot(x)) であるべき"),
+        },
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn unary_operator_binds_tighter_than_multiplication() {
+    let prog = parse("{ var x: bit; x = !x * 2; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            // (!x) * 2 の形（Mulが最外、lhsがUnaryOp）になっているはず
+            match expr {
+                Expr::BinOp { op: BinOp::Mul, lhs, .. } => {
+                    assert!(matches!(**lhs, Expr::UnaryOp { op: UnOp::Not, .. }));
+                }
+                _ => panic!("最外は Mul であるべき"),
+            }
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn not_equal_operator_is_unaffected_by_unary_not() {
+    // "!=" は eq_op として扱われ、単項の "!" とは別物であることを確認
+    let prog = parse("{ var x: bit; var y: bit; x = y != 1; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BinOp { op: BinOp::Neq, .. }));
+        }
+        _ => panic!("comb assign が期待される"),
     }
 }

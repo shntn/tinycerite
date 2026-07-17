@@ -37,7 +37,8 @@ expression5       = expression6 (("==" | "!=") expression6)*
 expression6       = expression7 (("<=" | "<" | ">=" | ">") expression7)*
 expression7       = expression8 (("<<<" | "<<" | ">>>" | ">>") expression8)*
 expression8       = expression9 (("+" | "-") expression9)*
-expression9       = expression_factor (("*" | "/" | "%") expression_factor)*
+expression9       = expression_unary (("*" | "/" | "%") expression_unary)*
+expression_unary  = ("!" | "~")* expression_factor
 expression_factor = ident | number | "(" expression ")"
 
 ident       = [a-zA-Z_][a-zA-Z0-9_]*
@@ -51,16 +52,17 @@ number      = [0-9]+
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
 - 演算子（優先度が高い順）:
-  1. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
-  2. `+` `-` — 加算・減算（u64のラップアラウンドで近似）
-  3. `<<` `>>` `<<<` `>>>` — 論理/算術シフト（現状は同じ動作。シフト量が64以上は0を返す）
-  4. `<` `<=` `>` `>=` — 大小比較（結果は1ビットの真偽値）
-  5. `==` `!=` — 等値比較（結果は1ビットの真偽値）
-  6. `&` — ビット単位 AND
-  7. `^` — ビット単位 XOR
-  8. `|` — ビット単位 OR
-  9. `&&` — 論理 AND（結果は1ビットの真偽値）
-  10. `||` — 論理 OR（結果は1ビットの真偽値）
+  1. `!` `~` — 前置単項演算子。論理否定（`!`、結果は1ビットの真偽値）とビット反転（`~`、結果はオペランドと同じ幅）。連続して書ける（例: `!!a`、右結合で内側から適用）
+  2. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
+  3. `+` `-` — 加算・減算（u64のラップアラウンドで近似）
+  4. `<<` `>>` `<<<` `>>>` — 論理/算術シフト（現状は同じ動作。シフト量が64以上は0を返す）
+  5. `<` `<=` `>` `>=` — 大小比較（結果は1ビットの真偽値）
+  6. `==` `!=` — 等値比較（結果は1ビットの真偽値）
+  7. `&` — ビット単位 AND
+  8. `^` — ビット単位 XOR
+  9. `|` — ビット単位 OR
+  10. `&&` — 論理 AND（結果は1ビットの真偽値）
+  11. `||` — 論理 OR（結果は1ビットの真偽値）
 
 ## サンプル
 
@@ -145,11 +147,21 @@ number      = [0-9]+
     - `op` — 演算子の種類
     - `lhs` — 左辺の式
     - `rhs` — 右辺の式
+  - `UnaryOp { op: UnOp, expr: Box<Expr> }` — 前置単項演算
+    - `op` — 演算子の種類
+    - `expr` — オペランドの式
 
 `BinOp` (enum) :
 
 - 役割: 二項演算子の種類。
 - バリアント: `Or`(`||`) `And`(`&&`) `BitOr`(`|`) `Xor`(`^`) `BitAnd`(`&`) `Eq`(`==`) `Neq`(`!=`) `Lt`(`<`) `Le`(`<=`) `Gt`(`>`) `Ge`(`>=`) `Shl`(`<<`) `Shr`(`>>`) `AShl`(`<<<`) `AShr`(`>>>`) `Add`(`+`) `Sub`(`-`) `Mul`(`*`) `Div`(`/`) `Mod`(`%`)
+
+- `Display` 実装: 各バリアントを対応する演算子記号に変換する（上記カッコ内の記号）
+
+`UnOp` (enum) :
+
+- 役割: 前置単項演算子の種類。
+- バリアント: `Not`(`!`、論理否定) `BitNot`(`~`、ビット反転)
 
 - `Display` 実装: 各バリアントを対応する演算子記号に変換する（上記カッコ内の記号）
 
@@ -228,6 +240,11 @@ number      = [0-9]+
   | `parse_expression8` | `add_op` | `+`→`Add`, `-`→`Sub` |
   | `parse_expression9` | `mul_op` | `*`→`Mul`, `/`→`Div`, `%`→`Mod` |
 
+`parse_expression_unary(pair: Pair<Rule>) -> Result<Expr>` :
+
+- 概要: `expression_unary`（`unary_op* ~ expression_factor`）を右結合の `Expr::UnaryOp` 木に組み立てる。優先順位チェーンの最下段（`parse_expression9`）が呼ぶ、`expression_factor` の直前の1段。
+- 処理: 子ペアを走査して `Rule::unary_op`（`!`→`Not`、`~`→`BitNot`）を出現順に集め、`Rule::expression_factor` を `parse_expression_factor` で解決。集めた演算子を逆順（オペランドに近い方から）に適用し、`!~a` が `Not(BitNot(a))` になるようネストする。
+
 `parse_expression_factor(pair: Pair<Rule>) -> Result<Expr>` :
 
 - 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`、または括弧で囲まれた `Expr`（`expression` を再帰的に解決）を構築する。
@@ -260,7 +277,8 @@ expression5       = { expression6 ~ (eq_op ~ expression6)* }
 expression6       = { expression7 ~ (rel_op ~ expression7)* }
 expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
-expression9       = { expression_factor ~ (mul_op ~ expression_factor)* }
+expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
+expression_unary  = { unary_op* ~ expression_factor }
 expression_factor = { ident | number | "(" ~ expression ~ ")" }
 
 or_op     = { "||" }
@@ -273,6 +291,7 @@ rel_op    = { "<=" | "<" | ">=" | ">" }
 shift_op  = { "<<<" | "<<" | ">>>" | ">>" }
 add_op    = { "+" | "-" }
 mul_op    = { "*" | "/" | "%" }
+unary_op  = { "!" | "~" }
 
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }
@@ -283,6 +302,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 演算子は個別ルール（`or_op`/`eq_op`など）でラップしている。pestでは無名の文字列リテラルは子Pairにならないため、`("+" | "-")`のように選択肢が複数ある演算子はラップしないとどちらが一致したか判別できない。
 - 各優先順位ルールは `(op ~ next)*` の繰り返し形にしている。単に `next ~ op ~ next`（1回だけ）にすると、演算子を含まない単項の式や3項以上の連鎖がパースできなくなる。
 - `rel_op`/`shift_op` は選択肢の順序が重要。PEGの選択はバックトラックせず最初に一致したものを採用するため、`"<"` を `"<="` より先に書くと `<=` の `=` が読めずに壊れる。長い演算子を先に置く必要がある（例: `"<="` の後に `"<"`）。
+- `unary_op`（前置の `!`）と `eq_op` の `!=` は文字が重なるが衝突しない。`unary_op` は「オペランドの開始位置」（`expression_unary` の先頭）でのみ試され、`!=` は「演算子の開始位置」（`eq_op` の位置、両オペランドの間）でのみ試されるため、同じ入力位置で競合することがない。
 
 - `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
 - `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
@@ -439,6 +459,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     - `lhs` — 左辺のノードID
     - `rhs` — 右辺のノードID
     - `width` — 結果のビット幅
+  - `UnaryOp { id: NodeId, op: UnOp, operand: NodeId, width: u64 }` — 単項演算
+    - `op` — 演算子
+    - `operand` — オペランドのノードID
+    - `width` — 結果のビット幅（`Not`なら1、`BitNot`ならオペランドと同じ幅）
   - `Drive { id: NodeId, signal_id: usize, signal_name: String, source: NodeId, kind: DriveKind, width: u64 }` — 信号駆動
     - `signal_id` — 駆動する信号のID
     - `signal_name` — デバッグ用の信号名
@@ -486,8 +510,9 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_const(&mut self, value, width) -> NodeId` — 定数ノードを生成
   - `make_read_signal(&mut self, signal_id, name, width) -> NodeId` — 信号読み出しノードを生成
   - `make_binop(&mut self, op, lhs, rhs, width) -> NodeId` — 二項演算ノードを生成
+  - `make_unaryop(&mut self, op, operand, width) -> NodeId` — 単項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
-  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方）
+  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
 ### 関数
@@ -524,6 +549,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     N  4: Read(a)  (1 bit)
     N  5: Drive(b)  (non-blocking)  <= N4
   ```
+- `UnaryOp` の表示例（`x = !a;` の場合）: `N  2: UnaryOp(!)  (1 bit)  = !N1`
 
 ---
 
@@ -597,6 +623,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Const` → 保持している定数値を返す
   - `ReadSignal` → `signal_values` から該当信号の値を返す
   - `BinOp` → 左右の子ノードを再帰評価し、`eval_binop` で演算子を適用する
+  - `UnaryOp` → オペランドノードを再帰評価し、`eval_unaryop` で演算子を適用する
   - `Drive` → ソースノードを再帰評価して返す（値をそのまま中継）
 
 `eval_binop(op: BinOp, l: u64, r: u64) -> u64` :
@@ -609,6 +636,13 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Shl`/`AShl`、`Shr`/`AShr` → `checked_shl`/`checked_shr`。シフト量が64以上ならNoneになるため0を返す（現状 `<<<`/`>>>` と `<<`/`>>` は同じ動作。この言語に符号付き型が無いため算術/論理シフトの区別を実装していない）
   - `Add`/`Sub`/`Mul` → `wrapping_*` でオーバーフローを丸める。式の途中経過（中間の`BinOp`）は信号の幅では切り詰められず、u64のラップアラウンドになる点に注意（信号への代入時にのみ`mask_to_width`で宣言幅に切り詰められる）
   - `Div`/`Mod` → `checked_div`/`checked_rem`。0除算は未定義値（'x'）が無いため0を返す
+
+`eval_unaryop(op: UnOp, v: u64) -> u64` :
+
+- 概要: 単項演算子を実際の `u64` 計算に適用する。
+- 処理:
+  - `Not` → 真偽値の否定（`v == 0`）、結果は0か1
+  - `BitNot` → ビット単位の反転（`!v`）。`BinOp`と同様、ここでは幅マスキングを行わずu64の全ビット反転で近似し、信号への代入時にのみ`mask_to_width`で宣言幅に切り詰められる
 
 `format_waveform(snapshots: &[CycleSnapshot], signals: &[NetlistSignal]) -> String` :
 
@@ -690,7 +724,7 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 
 | 追加したい機能                        | 変更するファイル                                                                                                           |
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| 単項演算子（`!`, `~`, `-`）           | `ast.rs` (Expr::UnaryOp 追加), `grammar.pest` (expression_factorに前置演算子), `parser.rs`, `netlist.rs`, `simulator.rs`   |
+| 単項マイナス（`-a`）                  | `ast.rs` (UnOp::Neg 追加), `grammar.pest` (unary_opに`-`追加), `parser.rs`, `netlist.rs`, `simulator.rs`                   |
 | 三項演算子（`cond ? a : b`）          | `ast.rs` (Expr 拡張), `grammar.pest` (expressionの最上位に追加), `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`     |
 | ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs`                                                       |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |

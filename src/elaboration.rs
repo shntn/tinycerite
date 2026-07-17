@@ -49,6 +49,10 @@ pub enum ResolvedExpr {
         lhs: Box<ResolvedExpr>,
         rhs: Box<ResolvedExpr>,
     },
+    UnaryOp {
+        op: UnOp,
+        expr: Box<ResolvedExpr>,
+    },
 }
 
 /// エラボレーション結果
@@ -224,6 +228,7 @@ fn collect_read_signals(expr: &ResolvedExpr) -> Vec<usize> {
             v.extend(collect_read_signals(rhs));
             v
         }
+        ResolvedExpr::UnaryOp { expr, .. } => collect_read_signals(expr),
     }
 }
 
@@ -243,6 +248,13 @@ fn resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr> {
                 op: *op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
+            })
+        }
+        Expr::UnaryOp { op, expr } => {
+            let expr = resolve_expr(expr, symtab)?;
+            Ok(ResolvedExpr::UnaryOp {
+                op: *op,
+                expr: Box::new(expr),
             })
         }
     }

@@ -1,4 +1,4 @@
-use crate::ast::BinOp;
+use crate::ast::{BinOp, UnOp};
 use crate::elaboration::{Elaborated, ResolvedExpr, ResolvedStmt};
 use std::fmt;
 
@@ -28,6 +28,13 @@ pub enum Node {
         op: BinOp,
         lhs: NodeId,
         rhs: NodeId,
+        width: u64,
+    },
+    /// 単項演算
+    UnaryOp {
+        id: NodeId,
+        op: UnOp,
+        operand: NodeId,
         width: u64,
     },
     /// 信号駆動（組み合わせ）
@@ -106,6 +113,7 @@ impl NetlistBuilder {
             Node::Const { id, .. } => *id,
             Node::ReadSignal { id, .. } => *id,
             Node::BinOp { id, .. } => *id,
+            Node::UnaryOp { id, .. } => *id,
             Node::Drive { id, .. } => *id,
         };
         self.nodes.push(node);
@@ -130,6 +138,11 @@ impl NetlistBuilder {
     fn make_binop(&mut self, op: BinOp, lhs: NodeId, rhs: NodeId, width: u64) -> NodeId {
         let id = self.alloc_id();
         self.add_node(Node::BinOp { id, op, lhs, rhs, width })
+    }
+
+    fn make_unaryop(&mut self, op: UnOp, operand: NodeId, width: u64) -> NodeId {
+        let id = self.alloc_id();
+        self.add_node(Node::UnaryOp { id, op, operand, width })
     }
 
     fn make_drive(
@@ -177,6 +190,15 @@ impl NetlistBuilder {
                 };
                 self.make_binop(*op, lhs_id, rhs_id, width)
             }
+            ResolvedExpr::UnaryOp { op, expr } => {
+                let operand_id = self.build_expr(expr, signals);
+                // 論理否定の結果は真偽値（1ビット）、ビット反転はオペランドと同じ幅
+                let width = match op {
+                    UnOp::Not => 1,
+                    UnOp::BitNot => self.node_width(operand_id),
+                };
+                self.make_unaryop(*op, operand_id, width)
+            }
         }
     }
 
@@ -185,6 +207,7 @@ impl NetlistBuilder {
             Node::Const { width, .. } => *width,
             Node::ReadSignal { width, .. } => *width,
             Node::BinOp { width, .. } => *width,
+            Node::UnaryOp { width, .. } => *width,
             Node::Drive { width, .. } => *width,
         }
     }
@@ -268,6 +291,12 @@ pub fn format_netlist(nl: &Netlist) -> String {
                 out.push_str(&format!(
                     "  N{:>3}: BinOp({})  ({} bit)  = N{} {} N{}\n",
                     id, op, width, lhs, op, rhs,
+                ));
+            }
+            Node::UnaryOp { id, op, operand, width } => {
+                out.push_str(&format!(
+                    "  N{:>3}: UnaryOp({})  ({} bit)  = {}N{}\n",
+                    id, op, width, op, operand,
                 ));
             }
             Node::Drive { id, signal_name, source, kind, .. } => {

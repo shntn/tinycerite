@@ -13,7 +13,8 @@ expression5       = { expression6 ~ (eq_op ~ expression6)* }
 expression6       = { expression7 ~ (rel_op ~ expression7)* }
 expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
-expression9       = { expression_factor ~ (mul_op ~ expression_factor)* }
+expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
+expression_unary  = { unary_op* ~ expression_factor }
 expression_factor = { ident | number | "(" ~ expression ~ ")" }
 
 or_op     = { "||" }
@@ -26,6 +27,7 @@ rel_op    = { "<=" | "<" | ">=" | ">" }
 shift_op  = { "<<<" | "<<" | ">>>" | ">>" }
 add_op    = { "+" | "-" }
 mul_op    = { "*" | "/" | "%" }
+unary_op  = { "!" | "~" }
 
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }

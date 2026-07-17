@@ -226,12 +226,41 @@ fn parse_expression8(pair: Pair<Rule>) -> Result<Expr> {
 }
 
 fn parse_expression9(pair: Pair<Rule>) -> Result<Expr> {
-    parse_left_assoc(pair, parse_expression_factor, |s| match s {
+    parse_left_assoc(pair, parse_expression_unary, |s| match s {
         "*" => BinOp::Mul,
         "/" => BinOp::Div,
         "%" => BinOp::Mod,
         _ => unreachable!("mul_op は *, /, % のみ"),
     })
+}
+
+/// 前置単項演算子の連鎖（`unary_op* ~ expression_factor`）を右結合の `Expr::UnaryOp` 木に組み立てる
+fn parse_expression_unary(pair: Pair<Rule>) -> Result<Expr> {
+    let mut ops = Vec::new();
+    let mut operand = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::unary_op => ops.push(match inner.as_str() {
+                "!" => UnOp::Not,
+                "~" => UnOp::BitNot,
+                _ => unreachable!("unary_op は ! か ~ のみ"),
+            }),
+            Rule::expression_factor => operand = Some(parse_expression_factor(inner)?),
+            _ => {}
+        }
+    }
+
+    let mut expr = operand.ok_or_else(|| ParseError {
+        message: "式の項が見つかりません".to_string(),
+    })?;
+    for op in ops.into_iter().rev() {
+        expr = Expr::UnaryOp {
+            op,
+            expr: Box::new(expr),
+        };
+    }
+    Ok(expr)
 }
 
 fn parse_expression_factor(pair: Pair<Rule>) -> Result<Expr> {

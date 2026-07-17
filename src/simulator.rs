@@ -126,6 +126,10 @@ fn eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64 {
             let r = eval_node(*rhs, nodes, signal_values);
             eval_binop(*op, l, r)
         }
+        Node::UnaryOp { op, operand, .. } => {
+            let v = eval_node(*operand, nodes, signal_values);
+            eval_unaryop(*op, v)
+        }
         Node::Drive { source, .. } => eval_node(*source, nodes, signal_values),
     }
 }
@@ -156,6 +160,18 @@ fn eval_binop(op: crate::ast::BinOp, l: u64, r: u64) -> u64 {
         BinOp::Mul => l.wrapping_mul(r),
         BinOp::Div => l.checked_div(r).unwrap_or(0),
         BinOp::Mod => l.checked_rem(r).unwrap_or(0),
+    }
+}
+
+/// 単項演算子を適用する
+///
+/// `~` はここでは幅マスキングを行わずu64のビット反転で近似する（他の演算と同様、
+/// 信号への代入時にのみ mask_to_width で宣言幅に切り詰められる）。
+fn eval_unaryop(op: crate::ast::UnOp, v: u64) -> u64 {
+    use crate::ast::UnOp;
+    match op {
+        UnOp::Not => u64::from(v == 0),
+        UnOp::BitNot => !v,
     }
 }
 
