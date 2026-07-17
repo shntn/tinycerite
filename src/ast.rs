@@ -1,10 +1,11 @@
 use std::fmt;
 
-/// プログラム全体（トップレベルのブロックとモジュール定義）
+/// プログラム全体（トップレベルのブロック・モジュール定義・テストベンチ定義）
 #[derive(Debug, Clone)]
 pub struct Program {
     pub blocks: Vec<Block>,
     pub modules: Vec<ModuleDef>,
+    pub testbenches: Vec<TestbenchDef>,
 }
 
 /// ブロック
@@ -45,6 +46,32 @@ pub struct InstDecl {
     pub instance_name: String,
     pub module_name: String,
     pub args: Vec<(String, Expr)>,
+}
+
+/// テストベンチ定義。プログラム中に高々1つ。
+///
+/// `decls`/`instances`/`stmts` は常時並行に動く既存の代入文と同じ意味論で
+/// トップレベルの信号空間に合流する。`initial` だけが手続き的（上から順に
+/// 実行され、`step`で明示的に1サイクル進める）という別の意味論を持つ。
+#[derive(Debug, Clone)]
+pub struct TestbenchDef {
+    pub name: String,
+    pub decls: Vec<Decl>,
+    pub instances: Vec<InstDecl>,
+    pub stmts: Vec<Stmt>,
+    pub initial: Vec<ProcStmt>,
+}
+
+/// `initial { }` 内の手続き文
+#[derive(Debug, Clone)]
+pub enum ProcStmt {
+    /// `target = expr;` — その瞬間に一度だけ値を設定する（継続的な駆動ではない）
+    Assign {
+        target: String,
+        expr: Expr,
+    },
+    /// `step;` — シミュレーションを1サイクル進める
+    Step,
 }
 
 /// 変数宣言

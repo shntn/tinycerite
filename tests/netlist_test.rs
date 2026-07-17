@@ -1,5 +1,5 @@
 use tinycerilte::elaboration;
-use tinycerilte::netlist::{self, DriveKind, SignalKind};
+use tinycerilte::netlist::{self, DriveKind, InitialStep, SignalKind};
 use tinycerilte::parser::Parser;
 
 fn netlist_of(input: &str) -> netlist::Netlist {
@@ -148,4 +148,29 @@ fn two_instances_of_the_same_module_get_distinct_namespaces() {
     assert!(names.contains(&"u1.sum"));
     assert!(names.contains(&"u2.sum"));
     assert_eq!(nl.signals.iter().filter(|s| s.name.ends_with(".sum")).count(), 2);
+}
+
+#[test]
+fn no_initial_block_produces_empty_initial_steps() {
+    let nl = netlist_of("{ var a: bit; a = 0; }");
+    assert!(nl.initial.is_empty());
+}
+
+#[test]
+fn initial_block_produces_matching_step_sequence() {
+    let nl = netlist_of("testbench tb { var x: bit<8>; initial { x = 3; step; step; } }");
+    assert_eq!(nl.initial.len(), 3);
+    assert!(matches!(nl.initial[0], InitialStep::Assign { .. }));
+    assert!(matches!(nl.initial[1], InitialStep::Step));
+    assert!(matches!(nl.initial[2], InitialStep::Step));
+}
+
+#[test]
+fn initial_assign_targets_correct_global_signal_id() {
+    let nl = netlist_of("testbench tb { var a: bit<8>; var x: bit<8>; initial { x = 3; } }");
+    let x_id = nl.signals.iter().position(|s| s.name == "x").unwrap();
+    match nl.initial[0] {
+        InitialStep::Assign { target, .. } => assert_eq!(target, x_id),
+        _ => panic!("Assignが期待される"),
+    }
 }

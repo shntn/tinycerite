@@ -1,7 +1,7 @@
 use tinycerilte::elaboration;
 use tinycerilte::netlist;
 use tinycerilte::parser::Parser;
-use tinycerilte::simulator::{format_waveform, Simulator};
+use tinycerilte::simulator::{eval_and_mask, format_waveform, Simulator};
 
 fn setup(input: &str) -> (Simulator, Vec<netlist::Node>, Vec<netlist::NetlistSignal>) {
     let prog = Parser::parse_program(input).unwrap();
@@ -224,6 +224,77 @@ fn module_instance_with_sequential_output_has_one_cycle_latency() {
     assert_eq!(snap0.values[sum_id], 0, "初回サイクルではsumは未反映(0)のまま");
     let snap1 = sim.step(&nodes);
     assert_eq!(snap1.values[sum_id], 7, "1サイクル遅れでsum=7が反映される");
+}
+
+/// `nl.initial`（testbenchのinitial手続き）をmain.rsのrun_initial_sequenceと同じ手順で実行し、
+/// 最終的な信号値のリストを返す
+fn run_initial(input: &str) -> (Simulator, Vec<netlist::Node>, Vec<netlist::NetlistSignal>) {
+    let prog = Parser::parse_program(input).unwrap();
+    let elab = elaboration::elaborate(&prog).unwrap();
+    let nl = netlist::build_netlist(&elab);
+    let mut sim = Simulator::new(nl.signals.len());
+
+    for step in &nl.initial {
+        match step {
+            netlist::InitialStep::Assign { target, expr_node } => {
+                let width = nl.signals[*target].width;
+                let value = eval_and_mask(*expr_node, &nl.nodes, sim.signal_values(), width);
+                sim.set_signal(*target, value);
+            }
+            netlist::InitialStep::Step => {
+                sim.step(&nl.nodes);
+            }
+        }
+    }
+
+    (sim, nl.nodes, nl.signals)
+}
+
+#[test]
+fn testbench_initial_assign_sets_value_immediately_without_stepping() {
+    let (sim, _, signals) = run_initial("testbench tb { var x: bit<8>; initial { x = 3; } }");
+    let x_id = signals.iter().position(|s| s.name == "x").unwrap();
+    assert_eq!(sim.signal_values()[x_id], 3, "stepしなくてもinitialのassignは即座に反映される");
+}
+
+#[test]
+fn testbench_initial_assign_is_masked_to_target_width() {
+    let (sim, _, signals) = run_initial("testbench tb { var x: bit<4>; initial { x = 17; } }");
+    let x_id = signals.iter().position(|s| s.name == "x").unwrap();
+    assert_eq!(sim.signal_values()[x_id], 1, "17 & 0b1111 = 1（通常の代入と同じマスキング）");
+}
+
+#[test]
+fn testbench_clock_divider_toggles_every_cycle() {
+    // counter/clkはどちらもSequentialで、同じサイクル開始時点のsnapshotを参照するため、
+    // clkはcounterの「サイクル開始時点」のLSBを反映する（counter自身のPhase2結果ではない）。
+    // counter=0スタートなので: step1後clk=0(snapshot counter=0), step2後clk=1(snapshot counter=1)。
+    let (sim, _, signals) = run_initial(
+        "testbench tb { var counter: bit<8>; counter <= counter + 1; \
+         var clk: bit; clk <= counter & 1; \
+         initial { step; step; } }",
+    );
+    let clk_id = signals.iter().position(|s| s.name == "clk").unwrap();
+    assert_eq!(sim.signal_values()[clk_id], 1, "2サイクル目でclkは0→1にトグルする");
+}
+
+#[test]
+fn testbench_self_toggling_clock_flips_every_cycle() {
+    let (sim, _, signals) =
+        run_initial("testbench tb { var clk: bit; clk <= !clk; initial { step; } }");
+    let clk_id = signals.iter().position(|s| s.name == "clk").unwrap();
+    assert_eq!(sim.signal_values()[clk_id], 1, "clk <= !clk は自身のsnapshotを見るので毎ステップ確実にトグルする");
+}
+
+#[test]
+fn testbench_drives_module_instance_and_reads_output_after_step() {
+    let src = "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum = a + b; } \
+               testbench tb { var x: bit<8>; var y: bit<8>; var z: bit<8>; \
+               var u1 = adder(a: x, b: y); \
+               initial { x = 3; y = 4; step; z = u1.sum; } }";
+    let (sim, _, signals) = run_initial(src);
+    let z_id = signals.iter().position(|s| s.name == "z").unwrap();
+    assert_eq!(sim.signal_values()[z_id], 7, "initial内でx,yを設定しstep後にu1.sumをzへ読み出せる");
 }
 
 #[test]

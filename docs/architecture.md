@@ -11,7 +11,7 @@ AST (Program)
 Elaborated IR（モジュール階層を保持）
   ↓ Netlist Builder — モジュール階層をフラットなDAGへ展開
 Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
-  ↓ Simulator — Δ-サイクル評価
+  ↓ Simulator — Δ-サイクル評価（テストベンチの`initial`があればその手続きに従って駆動）
 波形出力
 ```
 
@@ -22,12 +22,18 @@ Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
 ## 文法 (EBNF)
 
 ```
-program     = (module_def | block)+
+program     = (module_def | testbench_def | block)+
 
 # モジュール定義
 module_def  = "module" ident "{" port_block (decl | stmt)* "}"
 port_block  = "port" "{" port_decl* "}"
 port_decl   = ident ":" ("input" | "output") "bit" ("<" number ">")? ";"
+
+# テストベンチ定義（プログラム中に高々1つ）
+testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
+initial_block = "initial" "{" (proc_assign | proc_step)* "}"
+proc_assign   = ident "=" ternary_expr ";"
+proc_step     = "step" ";"
 
 block       = "{" (decl | inst_decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
@@ -71,6 +77,10 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 - `module name { port { ... } (var宣言 | 代入文)* }` — モジュール定義。`port { }` ブロックに入出力ポート（`input`/`output`）を宣言し、続けて内部信号の宣言・代入文を書く。`input` ポートへの内部代入はエラー。モジュール定義は宣言された時点で（インスタンス化の有無によらず）1回だけ解決・検証される
 - `var 名前 = モジュール名(ポート名: 式, ...);` — モジュールインスタンス化。`input` ポートだけを名前付き引数として接続する（構造体リテラルではなく関数呼び出し風の構文）。全`input`ポート分の接続が必須で、過不足・`output`ポートの指定はエラー
 - `インスタンス名.出力ポート名` — インスタンスの出力を式の中で読み出す（例: `z = u1.sum + 1;`）。`input`ポートを外部から読み出そうとするとエラー
+- `testbench name { (decl | inst_decl | stmt)* initial_block? }` — テストベンチ定義。プログラム中に高々1つ（2つ以上あるとエラー）。`initial`より前の並行部分（`decl`/`inst_decl`/`stmt`）は`block`と全く同じ意味論で、トップレベルの信号空間（`block`群と共有）に合流する。クロック信号もここで普通の代入文として作る（例: `clk <= !clk;`で毎サイクルトグル、`clk <= counter & 1;`で分周。1回の`Simulator::step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる。専用の「クロック型」は無く、既存の信号・演算子だけで表現する）
+- `initial { (proc_assign | proc_step)* }` — テストベンチ内の手続き部分（省略可）。並行部分とは異なる意味論を持つ: 上から順に、1文ずつ実行される
+  - `proc_assign`（`target = expr;`）— その瞬間に一度だけ`target`に値を設定する（継続的な駆動ではない。`Simulator::set_signal`相当）
+  - `proc_step`（`step;`）— シミュレーションを明示的に1サイクル進める（`Simulator::step`相当）
 - 演算子（優先度が高い順）:
   1. `!` `~` — 前置単項演算子。論理否定（`!`、結果は1ビットの真偽値）とビット反転（`~`、結果はオペランドと同じ幅）。連続して書ける（例: `!!a`、右結合で内側から適用）
   2. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
@@ -126,6 +136,43 @@ module adder {
 - モジュールが別のモジュールをインスタンス化すること（ネスト）は未対応（文法上、`inst_decl` はトップレベルの `block` にのみ許可されている）
 - インスタンス境界をまたぐ組合せループ（あるインスタンスの出力を同じインスタンスの入力に戻すような配線）はエラボレーション時点では検出できない。詳細は後述の `elaboration` モジュール節を参照
 
+## テストベンチの例
+
+```
+module adder {
+    port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
+    sum <= a + b;
+}
+
+testbench tb {
+    var counter: bit<8>;
+    counter <= counter + 1;
+
+    var clk: bit;
+    clk <= counter & 1;
+
+    var x: bit<8>;
+    var y: bit<8>;
+    var z: bit<8>;
+    var u1 = adder(a: x, b: y);
+
+    initial {
+        x = 3;
+        y = 4;
+        step;
+        step;
+        z = u1.sum;
+    }
+}
+```
+
+`initial`がある場合、CLIの`--cycles`は無視され、`initial`の手続き（`step;`の回数）に従って実行される。`initial`が無い（または`testbench`自体が無い）場合は今まで通り`--cycles N`でNサイクル実行する。
+
+現状の制限:
+
+- `assert`のような値検証構文は無い（波形出力を見て手動で確認する）
+- `testbench`はプログラム中に高々1つ（2つ以上あるとエラボレーションエラー）
+
 ---
 
 # モジュール一覧
@@ -152,10 +199,11 @@ module adder {
 
 `Program` :
 
-- 役割: パース結果のトップレベル。0個以上の Block とモジュール定義を持つ。
+- 役割: パース結果のトップレベル。0個以上の Block・モジュール定義・テストベンチ定義を持つ。
 - フィールド:
   - `blocks: Vec<Block>` — プログラム中のブロックのリスト
   - `modules: Vec<ModuleDef>` — プログラム中のモジュール定義のリスト
+  - `testbenches: Vec<TestbenchDef>` — プログラム中のテストベンチ定義のリスト（文法上は複数書けるが、高々1つという制約はエラボレーションで検証する）
 
 `Block` :
 
@@ -201,6 +249,23 @@ module adder {
   - `instance_name: String` — インスタンス名
   - `module_name: String` — インスタンス化するモジュール名
   - `args: Vec<(String, Expr)>` — 名前付き引数（`inputポート名, 接続式`）のリスト
+
+`TestbenchDef` :
+
+- 役割: `testbench name { ... }` によるテストベンチ定義。
+- フィールド:
+  - `name: String` — テストベンチ名
+  - `decls: Vec<Decl>` — 並行部分の変数宣言のリスト
+  - `instances: Vec<InstDecl>` — 並行部分のモジュールインスタンス化のリスト
+  - `stmts: Vec<Stmt>` — 並行部分の代入文のリスト（`Block`と同じ意味論でトップレベルの信号空間に合流する）
+  - `initial: Vec<ProcStmt>` — 手続き部分（`initial { }`）の文のリスト。`decls`/`instances`/`stmts`とは異なる意味論を持つ
+
+`ProcStmt` (enum) :
+
+- 役割: `initial { }` 内の手続き文。
+- バリアント:
+  - `Assign { target: String, expr: Expr }` — `target = expr;`。その瞬間に一度だけ値を設定する（継続的な駆動ではない）
+  - `Step` — `step;`。シミュレーションを1サイクル進める
 
 `Stmt` (enum) :
 
@@ -286,7 +351,7 @@ module adder {
 - 概要: 入力文字列をパースし、`Program` を返す。
 - 処理:
   1. `CeriteParser::parse(Rule::program, input)` を呼び、pest の `Pairs` を得る
-  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` → `parse_block()`、`Rule::module_def` → `parse_module_def()` に振り分けて `Program` を構築
+  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` → `parse_block()`、`Rule::module_def` → `parse_module_def()`、`Rule::testbench_def` → `parse_testbench_def()` に振り分けて `Program` を構築
 
 `parse_block(pair: Pair<Rule>) -> Result<Block>` :
 
@@ -307,6 +372,21 @@ module adder {
 
 - 概要: `port_decl`（`ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";"`）から `PortDecl` を構築。
 - 処理: 子ペアから `Rule::ident` → ポート名（`is_keyword`でキーワード検査）、`Rule::direction` → `input`→`Direction::Input`、`output`→`Direction::Output`、`Rule::number` → ビット幅（存在すれば）を抽出。
+
+`parse_testbench_def(pair: Pair<Rule>) -> Result<TestbenchDef>` :
+
+- 概要: `testbench_def`（`"testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}"`）から `TestbenchDef` を構築。
+- 処理: 子ペアから `Rule::ident` → テストベンチ名（`is_keyword`でキーワード検査）、`Rule::decl`/`Rule::inst_decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_inst_decl()`/`parse_stmt()` に振り分け、`Rule::initial_block` → `parse_initial_block()`。
+
+`parse_initial_block(pair: Pair<Rule>) -> Result<Vec<ProcStmt>>` :
+
+- 概要: `initial_block`（`"initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}"`）から `ProcStmt` のリストを構築。
+- 処理: `Rule::proc_assign` → `parse_proc_assign()`、`Rule::proc_step` → `ProcStmt::Step` を直接追加。
+
+`parse_proc_assign(pair: Pair<Rule>) -> Result<ProcStmt>` :
+
+- 概要: `proc_assign`（`ident ~ "=" ~ ternary_expr ~ ";"`）から `ProcStmt::Assign { target, expr }` を構築。
+- 処理: 子ペアから `Rule::ident` → 対象の変数名（`is_keyword`でキーワード検査）、`Rule::ternary_expr` → `parse_ternary_expr` で右辺を解決。
 
 `parse_inst_decl(pair: Pair<Rule>) -> Result<InstDecl>` :
 
@@ -380,8 +460,8 @@ module adder {
 
 `is_keyword(s: &str) -> bool` :
 
-- 概要: 文字列がキーワード（`var` / `bit` / `module` / `port` / `input` / `output`）かどうかを判定する。
-- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit`なども識別子として受理できてしまう）ため、識別子を確定させる各箇所（`parse_decl`・`parse_stmt`・`parse_expression_factor`・`parse_module_def`・`parse_port_decl`・`parse_inst_decl`・`parse_field_access`）でこの関数を呼んでキーワードを弾き、変数名・モジュール名・ポート名・インスタンス名としての使用を防いでいる。
+- 概要: 文字列がキーワード（`var` / `bit` / `module` / `port` / `input` / `output` / `testbench` / `initial` / `step`）かどうかを判定する。
+- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit`なども識別子として受理できてしまう）ため、識別子を確定させる各箇所（`parse_decl`・`parse_stmt`・`parse_expression_factor`・`parse_module_def`・`parse_port_decl`・`parse_inst_decl`・`parse_field_access`・`parse_testbench_def`・`parse_proc_assign`）でこの関数を呼んでキーワードを弾き、変数名・モジュール名・ポート名・インスタンス名・テストベンチ名としての使用を防いでいる。
 
 ### 文法ファイル: `grammar.pest`
 
@@ -390,12 +470,17 @@ module adder {
 - 内容:
 
 ```pest
-program = { SOI ~ (module_def | block)+ ~ EOI }
+program = { SOI ~ (module_def | testbench_def | block)+ ~ EOI }
 
 module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
 port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
 port_decl  = { ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
 direction  = { "input" | "output" }
+
+testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}" }
+initial_block = { "initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}" }
+proc_assign   = { ident ~ "=" ~ ternary_expr ~ ";" }
+proc_step     = { "step" ~ ";" }
 
 block     = { "{" ~ (decl | inst_decl | stmt)* ~ "}" }
 decl      = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
@@ -451,6 +536,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - `expression_factor` では `bitvec_literal` を `number` より先に置いている。`4'b1010` の `4` の部分だけで `number` にマッチしてしまうと、続く `'b1010` が余ってパース全体が失敗する。PEGの順序付き選択では `bitvec_literal` を先に試し、`'` が続かない入力（例えば単なる `42`）では自動的にバックトラックして `number` にフォールバックする。
 - 同様に `field_access`（`ident ~ "." ~ ident`）も `expression_factor` の中で単独の `ident` より先に置いている。`u1.sum` の `u1` だけで `ident` にマッチしてしまうと `.sum` が余ってパースが壊れるため、`field_access` を先に試し、`.` が続かない入力では `ident` にバックトラックする。
 - `inst_decl`（モジュールインスタンス化）は `block` の中にのみあり、`module_def` の本体（`(decl | stmt)*`）には含まれていない。これにより「モジュールが別のモジュールをインスタンス化する」というネストが文法レベルで禁止されている（現状の制限。将来ネストに対応する場合はここを緩める）。
+- `testbench_def` の `(decl | inst_decl | stmt)*` の直後に `initial_block?` を続けている。`initial` はキーワードなので `stmt`（`ident ~ (assign | nonblock) ~ ...`）が「initial」を識別子として食おうとしても、続く `{` が `assign`/`nonblock`（`=`/`<=`）にマッチせず `stmt` の試行は失敗し、`decl`/`inst_decl` も `"initial"` では始まらないため `(decl | inst_decl | stmt)*` はそこで自然に止まり、`initial_block` の解析に移る。
 - `program` は `SOI ~ ... ~ EOI` で入力全体の消費を明示的に要求している。pestの`Parser::parse()`は、指定したルールが入力の**先頭部分**にさえ一致すれば成功を返し、末尾に残った未消費の入力があってもエラーにしない（`EOI`を明示しない限り）。これを`SOI`/`EOI`無しのまま放置すると、例えば`//`コメントのようにこの文法がサポートしていない構文が入力の途中に現れた場合、そこで静かにパースを打ち切り、それ以降の内容（コメントの後に続くはずのブロック全体など）を**エラーも警告も無く**捨ててしまう（実際にこの不備が原因で、コメント付きのソースの後半ブロックが丸ごと無視されるバグが起きたことがある）。`EOI`まで明示的に要求することで、こうした未消費の残りは即座にパースエラーになる。
 - `COMMENT`（`"//" ~ (!"\n" ~ ANY)*`）は行コメントを定義する silent ルール。`WHITESPACE`と同様、`COMMENT`という名前の非atomicルールは暗黙的に他のルールのトークン間（`~`の間）に挿入されるため、個々のルールで明示的にコメントを許可する記述は不要。
 
@@ -535,12 +621,20 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
   - `ports: Vec<ResolvedPort>` — ポート定義のリスト
   - `body: ResolvedScope` — モジュール本体（ポートも通常の信号として`body.signals`に含まれる）
 
+`ResolvedProcStmt` (enum) :
+
+- 役割: 解決済みの手続き文（`initial { }` 内）。
+- バリアント:
+  - `Assign { target_id: usize, expr: ResolvedExpr }` — 対象信号ID（トップレベルのシンボルテーブルで解決済み）に値を設定する
+  - `Step` — シミュレーションを1サイクル進める
+
 `Elaborated` :
 
 - 役割: エラボレーション結果全体。
 - フィールド:
-  - `top: ResolvedScope` — トップレベルのスコープ
+  - `top: ResolvedScope` — トップレベルのスコープ（テストベンチの並行部分もここに合流している）
   - `modules: HashMap<String, ResolvedModuleDef>` — モジュール名 → 解決済みモジュール定義
+  - `initial: Vec<ResolvedProcStmt>` — テストベンチの`initial`（手続き部分）の解決後リスト（テストベンチが無い、または`initial`が無ければ空）
 
 `SymbolTable` (type alias) :
 
@@ -560,11 +654,13 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `elaborate(prog: &Program) -> Result<Elaborated>` :
 
-- 概要: AST を受け取り、まずモジュール定義をすべて解決・検証し、そのあとトップレベルを解決する。
+- 概要: AST を受け取り、まずモジュール定義をすべて解決・検証し、そのあとトップレベルを解決する。最後にテストベンチの`initial`を解決する。
 - 処理:
-  1. `build_module_defs` で全モジュール定義を1回ずつ解決・検証
-  2. `elaborate_top` でトップレベルのブロック群を解決
-  3. `Elaborated { top, modules }` を返す
+  1. `prog.testbenches.len() > 1` ならエラー（テストベンチは高々1つ）
+  2. `build_module_defs` で全モジュール定義を1回ずつ解決・検証
+  3. `elaborate_top` でトップレベルのブロック群（とテストベンチの並行部分）を解決し、あわせて`SymbolTable`/`InstanceTable`を得る
+  4. `resolve_initial` で、3で得た`SymbolTable`/`InstanceTable`を使ってテストベンチの`initial`を解決する
+  5. `Elaborated { top, modules, initial }` を返す
 
 `build_module_defs(prog: &Program) -> Result<HashMap<String, ResolvedModuleDef>>` :
 
@@ -580,28 +676,33 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
   4. `check_multiple_drivers`・`check_combinational_loops` を適用（`input`ポートは代入先になり得ないため、これらの関数自体に変更は不要）
   5. `ResolvedModuleDef { name, ports, body: ResolvedScope { signals, stmts, instances: vec![] } }` を返す
 
-`elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<ResolvedScope>` :
+`elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(ResolvedScope, SymbolTable, InstanceTable)>` :
 
-- 概要: トップレベルのブロック群を解決する。
+- 概要: トップレベルのブロック群（とテストベンチの並行部分）を解決する。後段の`resolve_initial`が同じシンボルテーブル・インスタンステーブルを再利用できるよう、`ResolvedScope`と一緒に返す。
 - 処理:
-  1. `build_signals` で信号を解決（既存のロジックのまま）
+  1. `build_signals` で信号を解決
   2. `build_instances` でモジュールインスタンス化を解決（モジュールテーブルを参照）
   3. `resolve_stmts` で代入文を解決（インスタンステーブルも渡し、`FieldAccess`の解決に使う）
   4. `check_multiple_drivers`・`check_combinational_loops` を適用
 
+`resolve_initial(prog, symtab, instances, modules) -> Result<Vec<ResolvedProcStmt>>` :
+
+- 概要: テストベンチの`initial`（手続き文）を解決する。対象信号はトップレベルのシンボルテーブルで解決する（`initial`はモジュール本体を持てないため、参照できるのはトップレベルの信号とインスタンスのみ）。
+- 処理: `prog.testbenches`の各`initial`ステップを走査し、`ProcStmt::Assign { target, expr }` → 対象変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、式を`resolve_expr`で解決して`ResolvedProcStmt::Assign`に、`ProcStmt::Step` → `ResolvedProcStmt::Step`にそのまま変換。
+
 `build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>` :
 
-- 概要: 全ブロックの宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。
-- 処理: 重複チェック（同名変数があればエラー）、シンボルテーブル（名前→ID）の構築、`ResolvedSignal` のリスト作成（`width` のデフォルトは1）
+- 概要: 全ブロック＋テストベンチの並行部分の宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。
+- 処理: `prog.blocks`の`decls`と`prog.testbenches`の`decls`を1本のイテレータとしてchainし、重複チェック（同名変数があればエラー）、シンボルテーブル（名前→ID）の構築、`ResolvedSignal` のリスト作成（`width` のデフォルトは1）。テストベンチの並行部分の宣言もトップレベルのブロックと全く同じ扱いでこの1本の信号空間に合流する。
 
 `build_instances(prog: &Program, symtab: &SymbolTable, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(Vec<ResolvedInstance>, InstanceTable)>` :
 
-- 概要: 全ブロックのモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。
+- 概要: 全ブロック＋テストベンチの並行部分のモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。
 - 処理: インスタンス名が信号名・他のインスタンス名と重複していないか検査 → 参照するモジュールが定義されているか検査 → 各引数が実在する`input`ポート名か（`output`ポート名を指定した場合や存在しないポート名は専用のエラーメッセージ）、重複していないかを検査 → 引数式を`resolve_expr`で解決（この時点までに解決済みの同スコープの他インスタンスも参照できるよう、インスタンステーブルを育てながら解決する）→ 全`input`ポート分の接続が揃っているか検査。
 
 `resolve_stmts(prog, symtab, instances, modules) -> Result<Vec<ResolvedStmt>>` :
 
-- 概要: 全ブロックの代入文を走査し、変数名をシンボルIDに解決する。
+- 概要: 全ブロック＋テストベンチの並行部分の代入文を走査し、変数名をシンボルIDに解決する。
 - 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`。インスタンステーブルとモジュールテーブルも渡す）、代入の種類（Combinational/Sequential）を保持
 
 `check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :
@@ -741,12 +842,20 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
     - `clock` — 更新のトリガー（`None` = クロック未指定、既存のステップ単位更新のまま）
     - `reset` — リセットの仕様（`None` = リセット無し）
 
+`InitialStep` (enum) :
+
+- 役割: テストベンチの`initial { }`の手続き文をネットリスト向けに展開したもの。
+- バリアント:
+  - `Assign { target: usize, expr_node: NodeId }` — 対象信号（グローバルID）を、式ノードを評価した値でその場で設定する（`Drive`ノードは経由しない、継続的な駆動ではない一度きりの設定）
+  - `Step` — シミュレーションを1サイクル進める
+
 `Netlist` :
 
 - 役割: 生成されたネットリスト全体。
 - フィールド:
   - `signals: Vec<NetlistSignal>` — 全信号のリスト
   - `nodes: Vec<Node>` — 全ノードのリスト（DAG の頂点集合）
+  - `initial: Vec<InitialStep>` — テストベンチの`initial`手続きの実行手順（テストベンチが無い、または`initial`が無ければ空）
 
 `NetlistSignal` :
 
@@ -783,7 +892,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
   - `make_ternary(&mut self, cond, then_branch, else_branch, width) -> NodeId` — 三項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
   - `drive_signal(&mut self, target_global, source, kind)` — `target_global`（グローバル信号ID）を`make_drive`で駆動し、対応する`NetlistSignal`の`driver_node`/`driver_kind`を更新する共通ヘルパー（組み合わせ代入・順序代入・インスタンスの`input`ポート接続の3箇所から呼ばれる）
-  - `flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules) -> Vec<usize>` — スコープ（トップレベルまたはモジュール本体）を再帰的にフラット化する。詳細は下記
+  - `flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules) -> (Vec<usize>, InstanceRemaps)` — スコープ（トップレベルまたはモジュール本体）を再帰的にフラット化する。詳細は下記
   - `build_expr(&mut self, expr, remap, instance_remaps, modules) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない。`BitVecLiteral`は専用の`Node`を持たず`make_const`にそのまま渡すが、明示された幅に収まらない値はここで幅へ切り詰めてから渡す。`remap`は現在のスコープのローカル信号ID→グローバル信号IDのリマップ、`instance_remaps`は現在のスコープが直接持つインスタンスのリマップで、`Ident`/`InstanceField`の解決にそれぞれ使う）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
@@ -795,17 +904,21 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `build_netlist(elab: &Elaborated) -> Netlist` :
 
-- 概要: エラボレーション結果からネットリストを生成する。実体は`NetlistBuilder::flatten_scope`をトップレベルスコープ（`elab.top`、プレフィックス空文字列）に対して1回呼ぶだけ。
-- 備考: モジュール階層はここで再帰的にフラット化される。展開後の`Node`/`NetlistSignal`はモジュールの存在を一切知らないため、`Simulator`はモジュール対応前と全く同じまま変更不要。
+- 概要: エラボレーション結果からネットリストを生成する。
+- 処理:
+  1. `NetlistBuilder::flatten_scope`をトップレベルスコープ（`elab.top`、プレフィックス空文字列）に対して1回呼び、`(remap, instance_remaps)`を得る（モジュール階層はここで再帰的にフラット化される）
+  2. `elab.initial`の各`ResolvedProcStmt`を走査し、`Assign { target_id, expr }`は1で得た`remap`/`instance_remaps`を使って式を`build_expr`し、`InitialStep::Assign { target: remap[target_id], expr_node }`に変換（`Drive`は生成しない）。`Step`はそのまま`InitialStep::Step`に変換
+  3. `Netlist { signals, nodes, initial }` を返す
+- 備考: モジュール階層はここで再帰的にフラット化される。展開後の`Node`/`NetlistSignal`はモジュールの存在を一切知らないため、`Simulator`はモジュール対応前と全く同じまま変更不要。`initial`のAssign式も普通の`build_expr`呼び出しで構築するだけなので、`InstanceField`（`u1.sum`など）を`initial`内で参照することもできる。
 
-`NetlistBuilder::flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules: &HashMap<String, ResolvedModuleDef>) -> Vec<usize>` :
+`NetlistBuilder::flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules: &HashMap<String, ResolvedModuleDef>) -> (Vec<usize>, InstanceRemaps)` :
 
-- 概要: スコープ（トップレベルまたはモジュール本体）をフラットな信号・ノードへ再帰的に展開する。戻り値はこのスコープのローカル信号ID→グローバル信号IDのリマップで、呼び出し元（インスタンス化した側）が入出力ポートの接続に使う。
+- 概要: スコープ（トップレベルまたはモジュール本体）をフラットな信号・ノードへ再帰的に展開する。戻り値はこのスコープのローカル信号ID→グローバル信号IDのリマップと、このスコープが直接持つインスタンスのリマップ（呼び出し元がポート接続や、トップレベルなら`initial`の式構築に使う）。
 - 処理:
   1. `scope.signals`の各信号を`scoped_name(prefix, ...)`で名前空間付きの`NetlistSignal`として`self.signals`に追加し、ローカルID→グローバルIDの`remap`を作る
   2. `scope.instances`の各インスタンスについて、そのモジュール本体を`prefix`にインスタンス名を足した名前空間（`scoped_name(prefix, instance_name)`）で再帰的に`flatten_scope`し、`instance_remaps`に`(モジュール名, リマップ)`を記録。続けて、そのモジュールの`input`ポートそれぞれについて、接続式（外側スコープの`remap`で解決）を`build_expr`し、`drive_signal`でインスタンス内部の当該ポート信号を組み合わせDriveとして駆動する（インスタンス化 = 入力ポートへの合成の代入、という扱い）
   3. `scope.stmts`の各文について、`build_expr`（`remap`と、ここまでに構築した`instance_remaps`を渡す）→`drive_signal`で駆動。`Sequential`の場合はさらに`kind`を`SignalKind::Reg { clock: None, reset: None }`に更新
-  4. `remap`を返す
+  4. `(remap, instance_remaps)`を返す
 
 `format_netlist(nl: &Netlist) -> String` :
 
@@ -891,10 +1004,15 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - 引数: `cycles` — 実行するサイクル数
 - 返り値: `Vec<CycleSnapshot>` — サイクル0〜N-1 のスナップショット
 
+`eval_and_mask(node_id: NodeId, nodes: &[Node], signal_values: &[u64], width: u64) -> u64` (公開関数) :
+
+- 概要: ノードを評価し、指定した幅にマスクする。テストベンチの`initial`内`proc_assign`（`Simulator::step`を経由しない即時代入）が、通常の代入と同じマスキング規則で信号値を設定するために使う公開ラッパー。`main.rs`の`run_initial_sequence`から呼ばれる。
+- 処理: `eval_node`と`mask_to_width`をそのまま呼ぶだけ。
+
 `mask_to_width(value: u64, width: u64) -> u64` :
 
 - 概要: 値を信号のビット幅に切り詰める（代入時のマスキング）。
-- 処理: `width`が64以上ならそのまま返す（シフトオーバーフロー回避）。それ以外は `value & ((1 << width) - 1)` でビットマスクする。`Simulator::step`のPhase 1・Phase 2の両方で、Driveノードの評価結果に対して呼ばれる。
+- 処理: `width`が64以上ならそのまま返す（シフトオーバーフロー回避）。それ以外は `value & ((1 << width) - 1)` でビットマスクする。`Simulator::step`のPhase 1・Phase 2の両方で、Driveノードの評価結果に対して呼ばれる（`eval_and_mask`経由でも呼ばれる）。
 
 `eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64` :
 
@@ -958,7 +1076,12 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 
 | 引数                 | 説明                                  |
 |----------------------|---------------------------------------|
-| `--cycles N`, `-c N` | シミュレーションを N サイクル実行する |
+| `--cycles N`, `-c N` | シミュレーションを N サイクル実行する（テストベンチに`initial`があれば無視される。下記参照） |
+
+## Phase 4 の実行モード（`main.rs::run_simulation_phase`）
+
+- `nl.initial`が空でなければ`run_initial_sequence(nl)`を呼ぶ: `Simulator::new`で初期化し、`nl.initial`を順に処理する。`InitialStep::Assign { target, expr_node }`は`eval_and_mask`で値を求めて`Simulator::set_signal`、`InitialStep::Step`は`Simulator::step`を呼びスナップショットを記録する。最後に記録したスナップショット列を`format_waveform`で表示する。
+- `nl.initial`が空なら、従来通り`--cycles`（`Some(n)`）が指定されていれば`Simulator::run`でNサイクル実行して波形表示。指定が無ければ何もしない（Phase 3までのネットリスト表示で終わる）。
 
 ---
 
@@ -1011,4 +1134,5 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュールのネスト（モジュールが別のモジュールをインスタンス化） | `grammar.pest` (`inst_decl`を`module_def`本体にも許可), `elaboration.rs` (`resolve_module_def`にインスタンス解決を追加、モジュール定義同士の循環インスタンス化を検出する依存グラフチェックを追加) |
 | インスタンス境界をまたぐ組合せループの検出（エラボレーション時点） | `elaboration.rs` (モジュール定義ごとに`input`→`output`の組合せ依存を要約し、`InstanceField`の`collect_read_signals`をその要約で置き換える) |
+| `assert`（テストベンチの値検証）      | `grammar.pest` (`initial_block`に`assert`文を追加), `ast.rs` (`ProcStmt::Assert`追加), `parser.rs`, `elaboration.rs` (`ResolvedProcStmt::Assert`), `netlist.rs` (`InitialStep::Assert`), `main.rs` (`run_initial_sequence`で評価しpass/fail報告) |
 | VCD ダンプ                            | `simulator.rs` (format_waveform の代わりに VCD 出力)                                                                       |

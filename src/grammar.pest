@@ -1,9 +1,14 @@
-program = { SOI ~ (module_def | block)+ ~ EOI }
+program = { SOI ~ (module_def | testbench_def | block)+ ~ EOI }
 
 module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
 port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
 port_decl  = { ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
 direction  = { "input" | "output" }
+
+testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}" }
+initial_block = { "initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}" }
+proc_assign   = { ident ~ "=" ~ ternary_expr ~ ";" }
+proc_step     = { "step" ~ ";" }
 
 block     = { "{" ~ (decl | inst_decl | stmt)* ~ "}" }
 decl      = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }

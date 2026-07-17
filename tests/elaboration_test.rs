@@ -218,3 +218,52 @@ fn instance_output_can_feed_another_instance_input() {
     let prog = Parser::parse_program(&src).unwrap();
     assert!(elaboration::elaborate(&prog).is_ok());
 }
+
+#[test]
+fn testbench_initial_resolves_target_and_step_count() {
+    let prog = Parser::parse_program(
+        "testbench tb { var x: bit<8>; initial { x = 3; step; step; } }",
+    )
+    .unwrap();
+    let elab = elaboration::elaborate(&prog).unwrap();
+    assert_eq!(elab.initial.len(), 3);
+    assert!(matches!(
+        elab.initial[0],
+        elaboration::ResolvedProcStmt::Assign { target_id: 0, .. }
+    ));
+    assert!(matches!(elab.initial[1], elaboration::ResolvedProcStmt::Step));
+    assert!(matches!(elab.initial[2], elaboration::ResolvedProcStmt::Step));
+}
+
+#[test]
+fn testbench_concurrent_signals_merge_into_top_level_scope() {
+    let prog = Parser::parse_program("testbench tb { var clk: bit; clk <= !clk; }").unwrap();
+    let elab = elaboration::elaborate(&prog).unwrap();
+    assert_eq!(elab.top.signals.len(), 1);
+    assert_eq!(elab.top.signals[0].name, "clk");
+    assert_eq!(elab.top.stmts.len(), 1);
+}
+
+#[test]
+fn testbench_instance_is_visible_to_initial_via_field_access() {
+    let src = format!(
+        "{adder} testbench tb {{ var x: bit<8>; var y: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: y); initial {{ x = 3; y = 4; step; z = u1.sum; }} }}",
+        adder = adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    assert!(elaboration::elaborate(&prog).is_ok());
+}
+
+#[test]
+fn assigning_to_undeclared_signal_in_initial_is_error() {
+    let prog = Parser::parse_program("testbench tb { initial { x = 3; } }").unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("x"), "エラー: {}", err.message);
+}
+
+#[test]
+fn multiple_testbenches_is_error() {
+    let prog = Parser::parse_program("testbench a { } testbench b { }").unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("1つ"), "エラー: {}", err.message);
+}

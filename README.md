@@ -40,10 +40,15 @@ cycle  a  b
 ### 文法
 
 ```
-program     = (module_def | block)+
-module_def  = "module" ident "{" port_block (decl | stmt)* "}"
-port_block  = "port" "{" port_decl* "}"
-port_decl   = ident ":" ("input" | "output") "bit" ("<" number ">")? ";"
+program       = (module_def | testbench_def | block)+
+module_def    = "module" ident "{" port_block (decl | stmt)* "}"
+port_block    = "port" "{" port_decl* "}"
+port_decl     = ident ":" ("input" | "output") "bit" ("<" number ">")? ";"
+
+testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
+initial_block = "initial" "{" (proc_assign | proc_step)* "}"
+proc_assign   = ident "=" ternary_expr ";"
+proc_step     = "step" ";"
 
 block       = "{" (decl | inst_decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
@@ -101,11 +106,51 @@ module adder {
 - モジュールが別のモジュールをインスタンス化すること（ネスト）は現状未対応
 - 既知の制限: あるインスタンスの出力を同じインスタンスの入力に戻すような、インスタンス境界をまたぐ組合せループはエラボレーション時点では検出できない（`InstanceField`読み出しは依存グラフ上では葉として扱われるため）。実際にそのような回路を書いた場合、シミュレーション実行時のΔ-サイクル上限（`MAX_COMB_ITERATIONS`）でパニックとして検出される
 
+### テストベンチ
+
+```
+module adder {
+    port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
+    sum <= a + b;
+}
+
+testbench tb {
+    var counter: bit<8>;
+    counter <= counter + 1;
+
+    var clk: bit;
+    clk <= counter & 1;      // クロック分周（既存の&演算子だけで書ける。新しい構文は不要）
+
+    var x: bit<8>;
+    var y: bit<8>;
+    var z: bit<8>;
+    var u1 = adder(a: x, b: y);
+
+    initial {
+        x = 3;
+        y = 4;
+        step;               // 1サイクル進める
+        step;
+        z = u1.sum;
+    }
+}
+```
+
+`testbench name { ... }` はプログラム中に高々1つ書ける、`module`と対になるトップレベル構文。中身は2つの部分からなる:
+
+- **並行部分**（`decl`/`inst_decl`/`stmt`、`initial`より前）— 今までの`block`と全く同じ意味論（常時並行に動く回路の接続）。クロック信号もここで普通の代入文として作る（`clk <= !clk;`のようにサイクルごとにトグルさせるか、`counter`と`&`を組み合わせて分周する。1回の`step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
+- **`initial { }`（手続き部分、省略可）** — 上から順に実行される。`target = expr;`（`proc_assign`）はその瞬間に一度だけ値を設定する（継続的な駆動ではない。`Simulator::set_signal`相当）。`step;`は明示的にシミュレーションを1サイクル進める（`Simulator::step`相当）
+
+`testbench`に`initial`がある場合、CLIの`--cycles`は無視され、`initial`の手続きに従って実行される（`step;`の回数だけサイクルが進む）。`initial`が無ければ（並行部分だけのテストベンチ、または`testbench`自体が無い場合）今まで通り`--cycles N`でNサイクル実行する。
+
+現状`assert`のような検証構文は無い（波形出力を見て手動で確認する）。
+
 ### 制限（現在）
 
 - ビットベクタリテラルの桁区切り（`8'b0000_0001`のような`_`）は未対応
 - モジュールのネスト（モジュールが別のモジュールをインスタンス化すること）は未対応
 - インスタンス境界をまたぐ組合せループの検出はエラボレーション時点では未対応（シミュレーション実行時には検出される。上記参照）
+- `initial`内に`assert`のような検証構文は無い
 - シミュレーションはパニックによる停止のみ（VCDダンプ未対応）
 
 ## アーキテクチャ
@@ -120,7 +165,7 @@ AST (Program)
 Elaborated IR（モジュール階層を保持）
   ↓ Netlist Builder — モジュール階層をフラットなDAGへ展開
 Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
-  ↓ Simulator — Δ-サイクル評価
+  ↓ Simulator — Δ-サイクル評価（testbenchのinitialがあればその手続きに従って駆動）
 波形出力
 ```
 
@@ -134,6 +179,8 @@ cargo run -- file.tc               # ファイル指定
 cargo run -- file.tc --cycles 10   # シミュレーション実行
 cargo run -- --cycles 6            # サンプルコードを6サイクル
 ```
+
+`file.tc`内に`initial`を持つ`testbench`があれば、`--cycles`は無視され`initial`の手続き（`step;`の回数）に従って実行される。
 
 ## テスト
 

@@ -6,7 +6,10 @@ use crate::ast::*;
 
 /// キーワードとして予約されている識別子
 fn is_keyword(s: &str) -> bool {
-    matches!(s, "var" | "bit" | "module" | "port" | "input" | "output")
+    matches!(
+        s,
+        "var" | "bit" | "module" | "port" | "input" | "output" | "testbench" | "initial" | "step"
+    )
 }
 
 /// pest パーサー（grammar.pest から自動生成）
@@ -47,18 +50,20 @@ impl Parser {
         let pairs = CeriteParser::parse(Rule::program, input)?;
         let mut blocks = Vec::new();
         let mut modules = Vec::new();
+        let mut testbenches = Vec::new();
         for pair in pairs {
             if pair.as_rule() == Rule::program {
                 for item_pair in pair.into_inner() {
                     match item_pair.as_rule() {
                         Rule::block => blocks.push(parse_block(item_pair)?),
                         Rule::module_def => modules.push(parse_module_def(item_pair)?),
+                        Rule::testbench_def => testbenches.push(parse_testbench_def(item_pair)?),
                         _ => {}
                     }
                 }
             }
         }
-        Ok(Program { blocks, modules })
+        Ok(Program { blocks, modules, testbenches })
     }
 }
 
@@ -154,6 +159,75 @@ fn parse_port_decl(pair: Pair<Rule>) -> Result<PortDecl> {
     })?;
 
     Ok(PortDecl { name, direction, width })
+}
+
+/// `testbench_def`（`"testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}"`）をパースする
+fn parse_testbench_def(pair: Pair<Rule>) -> Result<TestbenchDef> {
+    let mut name = String::new();
+    let mut decls = Vec::new();
+    let mut instances = Vec::new();
+    let mut stmts = Vec::new();
+    let mut initial = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+                if is_keyword(&name) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードでありテストベンチ名に使えません", name),
+                    });
+                }
+            }
+            Rule::decl => decls.push(parse_decl(inner)?),
+            Rule::inst_decl => instances.push(parse_inst_decl(inner)?),
+            Rule::stmt => stmts.push(parse_stmt(inner)?),
+            Rule::initial_block => initial = parse_initial_block(inner)?,
+            _ => {} // "{" "}" などは無視
+        }
+    }
+
+    Ok(TestbenchDef { name, decls, instances, stmts, initial })
+}
+
+/// `initial_block`（`"initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}"`）をパースする
+fn parse_initial_block(pair: Pair<Rule>) -> Result<Vec<ProcStmt>> {
+    let mut steps = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::proc_assign => steps.push(parse_proc_assign(inner)?),
+            Rule::proc_step => steps.push(ProcStmt::Step),
+            _ => {}
+        }
+    }
+    Ok(steps)
+}
+
+/// `proc_assign`（`ident ~ "=" ~ ternary_expr ~ ";"`）をパースする
+fn parse_proc_assign(pair: Pair<Rule>) -> Result<ProcStmt> {
+    let mut target = String::new();
+    let mut expr = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                target = inner.as_str().to_string();
+                if is_keyword(&target) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードであり変数名に使えません", target),
+                    });
+                }
+            }
+            Rule::ternary_expr => expr = Some(parse_ternary_expr(inner)?),
+            _ => {}
+        }
+    }
+
+    let expr = expr.ok_or_else(|| ParseError {
+        message: "式が見つかりません".to_string(),
+    })?;
+
+    Ok(ProcStmt::Assign { target, expr })
 }
 
 /// `inst_decl`（`"var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";"`）をパースする

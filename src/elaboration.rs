@@ -102,11 +102,22 @@ pub struct ResolvedModuleDef {
     pub body: ResolvedScope,
 }
 
+/// 解決済みの手続き文（`initial { }` 内）
+#[derive(Debug, Clone)]
+pub enum ResolvedProcStmt {
+    Assign {
+        target_id: usize,
+        expr: ResolvedExpr,
+    },
+    Step,
+}
+
 /// エラボレーション結果
 #[derive(Debug, Clone)]
 pub struct Elaborated {
     pub top: ResolvedScope,
     pub modules: HashMap<String, ResolvedModuleDef>,
+    pub initial: Vec<ResolvedProcStmt>,
 }
 
 /// シンボル名 → SignalId のマップ
@@ -120,10 +131,18 @@ pub type InstanceTable = HashMap<String, String>;
 /// まずモジュール定義をそれぞれ独立に（インスタンス化の有無によらず）解決・検証し、
 /// そのあとトップレベルのブロックを解決する。トップレベルは信号・代入文に加えて
 /// モジュールインスタンスも解決するため、モジュール定義のテーブルを参照する。
+/// 最後に、テストベンチの`initial`（手続き文）をトップレベルのシンボルテーブルで解決する。
 pub fn elaborate(prog: &Program) -> Result<Elaborated> {
+    if prog.testbenches.len() > 1 {
+        return Err(ElabError {
+            message: "テストベンチは1つだけ許可されています".to_string(),
+        });
+    }
+
     let modules = build_module_defs(prog)?;
-    let top = elaborate_top(prog, &modules)?;
-    Ok(Elaborated { top, modules })
+    let (top, symtab, instance_table) = elaborate_top(prog, &modules)?;
+    let initial = resolve_initial(prog, &symtab, &instance_table, &modules)?;
+    Ok(Elaborated { top, modules, initial })
 }
 
 /// 全モジュール定義を1回ずつ解決・検証する（重複定義はエラー）
@@ -209,8 +228,14 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
     })
 }
 
-/// トップレベルのブロック群を解決する: 信号・インスタンス・代入文の順に解決し、静的チェックを適用する
-fn elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<ResolvedScope> {
+/// トップレベルのブロック群（とテストベンチの並行部分）を解決する:
+/// 信号・インスタンス・代入文の順に解決し、静的チェックを適用する。
+/// 後段の`resolve_initial`が同じシンボルテーブル・インスタンステーブルを使えるよう、
+/// スコープと一緒に返す。
+fn elaborate_top(
+    prog: &Program,
+    modules: &HashMap<String, ResolvedModuleDef>,
+) -> Result<(ResolvedScope, SymbolTable, InstanceTable)> {
     let (signals, symtab) = build_signals(prog)?;
     let (instances, instance_table) = build_instances(prog, &symtab, modules)?;
     let stmts = resolve_stmts(prog, &symtab, &instance_table, modules)?;
@@ -218,30 +243,66 @@ fn elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -
     check_multiple_drivers(&stmts, &signals)?;
     check_combinational_loops(&stmts, &signals)?;
 
-    Ok(ResolvedScope { signals, stmts, instances })
+    Ok((ResolvedScope { signals, stmts, instances }, symtab, instance_table))
+}
+
+/// テストベンチの`initial`（手続き文）を解決する。
+/// 対象信号はトップレベルのシンボルテーブルで解決する（`initial`はモジュール本体を持てない）。
+fn resolve_initial(
+    prog: &Program,
+    symtab: &SymbolTable,
+    instances: &InstanceTable,
+    modules: &HashMap<String, ResolvedModuleDef>,
+) -> Result<Vec<ResolvedProcStmt>> {
+    let mut result = Vec::new();
+
+    for tb in &prog.testbenches {
+        for step in &tb.initial {
+            let resolved = match step {
+                ProcStmt::Assign { target, expr } => {
+                    let target_id = *symtab.get(target).ok_or_else(|| ElabError {
+                        message: format!("変数 '{}' が宣言されていません", target),
+                    })?;
+                    let expr = resolve_expr(expr, symtab, instances, modules)?;
+                    ResolvedProcStmt::Assign { target_id, expr }
+                }
+                ProcStmt::Step => ResolvedProcStmt::Step,
+            };
+            result.push(resolved);
+        }
+    }
+
+    Ok(result)
 }
 
 /// 宣言を走査し、シンボルテーブルと解決済み信号リストを構築する（重複宣言はエラー）
+///
+/// トップレベルのブロックとテストベンチの並行部分は、どちらも同じフラットな
+/// 信号空間に合流する（テストベンチの`decls`もここで一緒に登録される）。
 fn build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)> {
     let mut signals = Vec::new();
     let mut symtab = SymbolTable::new();
 
-    for block in &prog.blocks {
-        for decl in &block.decls {
-            if symtab.contains_key(&decl.name) {
-                return Err(ElabError {
-                    message: format!("変数 '{}' が重複宣言されています", decl.name),
-                });
-            }
-            let id = signals.len();
-            let width = decl.width.unwrap_or(1);
-            symtab.insert(decl.name.clone(), id);
-            signals.push(ResolvedSignal {
-                name: decl.name.clone(),
-                width,
-                id,
+    let all_decls = prog
+        .blocks
+        .iter()
+        .flat_map(|b| &b.decls)
+        .chain(prog.testbenches.iter().flat_map(|t| &t.decls));
+
+    for decl in all_decls {
+        if symtab.contains_key(&decl.name) {
+            return Err(ElabError {
+                message: format!("変数 '{}' が重複宣言されています", decl.name),
             });
         }
+        let id = signals.len();
+        let width = decl.width.unwrap_or(1);
+        symtab.insert(decl.name.clone(), id);
+        signals.push(ResolvedSignal {
+            name: decl.name.clone(),
+            width,
+            id,
+        });
     }
 
     Ok((signals, symtab))
@@ -259,63 +320,67 @@ fn build_instances(
     // ここまでに解決済みのインスタンスも見えるようにテーブルを育てながら解決する
     let mut resolved_so_far: HashMap<String, String> = HashMap::new();
 
-    for block in &prog.blocks {
-        for inst in &block.instances {
-            if symtab.contains_key(&inst.instance_name) || instance_table.contains_key(&inst.instance_name) {
-                return Err(ElabError {
-                    message: format!("'{}' という名前が信号またはインスタンスと重複しています", inst.instance_name),
-                });
-            }
-            let module_def = modules.get(&inst.module_name).ok_or_else(|| ElabError {
-                message: format!("モジュール '{}' が定義されていません", inst.module_name),
-            })?;
+    let all_instances = prog
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instances)
+        .chain(prog.testbenches.iter().flat_map(|t| &t.instances));
 
-            let input_ports: Vec<&ResolvedPort> =
-                module_def.ports.iter().filter(|p| p.direction == Direction::Input).collect();
-
-            let mut connections = HashMap::new();
-            for (arg_name, arg_expr) in &inst.args {
-                let is_input_port = input_ports.iter().any(|p| &p.name == arg_name);
-                if !is_input_port {
-                    let is_output_port = module_def.ports.iter().any(|p| &p.name == arg_name && p.direction == Direction::Output);
-                    let message = if is_output_port {
-                        format!(
-                            "'{}' はモジュール '{}' の出力ポートです。インスタンス化時には入力ポートのみ指定できます",
-                            arg_name, inst.module_name
-                        )
-                    } else {
-                        format!("モジュール '{}' に入力ポート '{}' はありません", inst.module_name, arg_name)
-                    };
-                    return Err(ElabError { message });
-                }
-                if connections.contains_key(arg_name) {
-                    return Err(ElabError {
-                        message: format!("引数 '{}' が重複しています", arg_name),
-                    });
-                }
-                let resolved_expr = resolve_expr(arg_expr, symtab, &resolved_so_far, modules)?;
-                connections.insert(arg_name.clone(), resolved_expr);
-            }
-
-            for p in &input_ports {
-                if !connections.contains_key(&p.name) {
-                    return Err(ElabError {
-                        message: format!(
-                            "モジュール '{}' の入力ポート '{}' が接続されていません",
-                            inst.module_name, p.name
-                        ),
-                    });
-                }
-            }
-
-            instance_table.insert(inst.instance_name.clone(), inst.module_name.clone());
-            resolved_so_far.insert(inst.instance_name.clone(), inst.module_name.clone());
-            instances.push(ResolvedInstance {
-                instance_name: inst.instance_name.clone(),
-                module_name: inst.module_name.clone(),
-                connections,
+    for inst in all_instances {
+        if symtab.contains_key(&inst.instance_name) || instance_table.contains_key(&inst.instance_name) {
+            return Err(ElabError {
+                message: format!("'{}' という名前が信号またはインスタンスと重複しています", inst.instance_name),
             });
         }
+        let module_def = modules.get(&inst.module_name).ok_or_else(|| ElabError {
+            message: format!("モジュール '{}' が定義されていません", inst.module_name),
+        })?;
+
+        let input_ports: Vec<&ResolvedPort> =
+            module_def.ports.iter().filter(|p| p.direction == Direction::Input).collect();
+
+        let mut connections = HashMap::new();
+        for (arg_name, arg_expr) in &inst.args {
+            let is_input_port = input_ports.iter().any(|p| &p.name == arg_name);
+            if !is_input_port {
+                let is_output_port = module_def.ports.iter().any(|p| &p.name == arg_name && p.direction == Direction::Output);
+                let message = if is_output_port {
+                    format!(
+                        "'{}' はモジュール '{}' の出力ポートです。インスタンス化時には入力ポートのみ指定できます",
+                        arg_name, inst.module_name
+                    )
+                } else {
+                    format!("モジュール '{}' に入力ポート '{}' はありません", inst.module_name, arg_name)
+                };
+                return Err(ElabError { message });
+            }
+            if connections.contains_key(arg_name) {
+                return Err(ElabError {
+                    message: format!("引数 '{}' が重複しています", arg_name),
+                });
+            }
+            let resolved_expr = resolve_expr(arg_expr, symtab, &resolved_so_far, modules)?;
+            connections.insert(arg_name.clone(), resolved_expr);
+        }
+
+        for p in &input_ports {
+            if !connections.contains_key(&p.name) {
+                return Err(ElabError {
+                    message: format!(
+                        "モジュール '{}' の入力ポート '{}' が接続されていません",
+                        inst.module_name, p.name
+                    ),
+                });
+            }
+        }
+
+        instance_table.insert(inst.instance_name.clone(), inst.module_name.clone());
+        resolved_so_far.insert(inst.instance_name.clone(), inst.module_name.clone());
+        instances.push(ResolvedInstance {
+            instance_name: inst.instance_name.clone(),
+            module_name: inst.module_name.clone(),
+            connections,
+        });
     }
 
     Ok((instances, instance_table))
@@ -330,20 +395,24 @@ fn resolve_stmts(
 ) -> Result<Vec<ResolvedStmt>> {
     let mut stmts = Vec::new();
 
-    for block in &prog.blocks {
-        for stmt in &block.stmts {
-            let target = stmt.target();
-            let target_id = *symtab.get(target).ok_or_else(|| ElabError {
-                message: format!("変数 '{}' が宣言されていません", target),
-            })?;
-            let expr = resolve_expr(stmt.expr(), symtab, instances, modules)?;
+    let all_stmts = prog
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .chain(prog.testbenches.iter().flat_map(|t| &t.stmts));
 
-            let resolved = match stmt {
-                Stmt::Combinational { .. } => ResolvedStmt::Combinational { target_id, expr },
-                Stmt::Sequential { .. } => ResolvedStmt::Sequential { target_id, expr },
-            };
-            stmts.push(resolved);
-        }
+    for stmt in all_stmts {
+        let target = stmt.target();
+        let target_id = *symtab.get(target).ok_or_else(|| ElabError {
+            message: format!("変数 '{}' が宣言されていません", target),
+        })?;
+        let expr = resolve_expr(stmt.expr(), symtab, instances, modules)?;
+
+        let resolved = match stmt {
+            Stmt::Combinational { .. } => ResolvedStmt::Combinational { target_id, expr },
+            Stmt::Sequential { .. } => ResolvedStmt::Sequential { target_id, expr },
+        };
+        stmts.push(resolved);
     }
 
     Ok(stmts)

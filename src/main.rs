@@ -136,8 +136,15 @@ fn run_netlist_phase(elab: &Elaborated) -> Netlist {
     nl
 }
 
-/// Phase 4: `--cycles` が指定されていればシミュレーションを実行し、波形を表示する
+/// Phase 4: テストベンチの`initial`があればその手続きに従って実行し、
+/// 無ければ`--cycles`が指定されている場合のみNサイクル実行する。
+/// どちらの場合も結果は波形として表示する。
 fn run_simulation_phase(nl: &Netlist, cycles: Option<u64>) {
+    if !nl.initial.is_empty() {
+        run_initial_sequence(nl);
+        return;
+    }
+
     let Some(n) = cycles else { return };
 
     println!("--- Phase 4: Simulation ({n} cycles) ---\n");
@@ -146,4 +153,27 @@ fn run_simulation_phase(nl: &Netlist, cycles: Option<u64>) {
         let snaps = sim.run(&nl.nodes, n);
         print!("{}", simulator::format_waveform(&snaps, &nl.signals));
     }
+}
+
+/// テストベンチの`initial`手続きを実行する: `Assign`はその場で値を設定し、
+/// `Step`は1サイクル進めてスナップショットを記録する。
+fn run_initial_sequence(nl: &Netlist) {
+    println!("--- Phase 4: Testbench (initial) ---\n");
+    let mut sim = simulator::Simulator::new(nl.signals.len());
+    let mut snaps = Vec::new();
+
+    for step in &nl.initial {
+        match step {
+            netlist::InitialStep::Assign { target, expr_node } => {
+                let width = nl.signals[*target].width;
+                let value = simulator::eval_and_mask(*expr_node, &nl.nodes, sim.signal_values(), width);
+                sim.set_signal(*target, value);
+            }
+            netlist::InitialStep::Step => {
+                snaps.push(sim.step(&nl.nodes));
+            }
+        }
+    }
+
+    print!("{}", simulator::format_waveform(&snaps, &nl.signals));
 }

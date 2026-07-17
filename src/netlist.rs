@@ -1,5 +1,5 @@
 use crate::ast::{BinOp, Direction, UnOp};
-use crate::elaboration::{Elaborated, ResolvedExpr, ResolvedModuleDef, ResolvedScope, ResolvedStmt};
+use crate::elaboration::{Elaborated, ResolvedExpr, ResolvedModuleDef, ResolvedProcStmt, ResolvedScope, ResolvedStmt};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -111,11 +111,21 @@ pub enum SignalKind {
     },
 }
 
+/// `initial { }` の手続き文をネットリスト向けに展開したもの
+#[derive(Debug, Clone)]
+pub enum InitialStep {
+    /// 対象信号(グローバルID)を、式ノードを評価した値で即座に設定する（継続的な駆動ではない）
+    Assign { target: usize, expr_node: NodeId },
+    /// シミュレーションを1サイクル進める
+    Step,
+}
+
 /// 生成されたネットリスト
 #[derive(Debug, Clone)]
 pub struct Netlist {
     pub signals: Vec<NetlistSignal>,
     pub nodes: Vec<Node>,
+    pub initial: Vec<InitialStep>,
 }
 
 /// ネットリスト上の信号情報
@@ -230,13 +240,14 @@ impl NetlistBuilder {
     ///
     /// `prefix`は展開後の信号名に付ける名前空間（トップレベルは空文字列、インスタンスは
     /// `"u1"`のようなインスタンス名）。戻り値はこのスコープのローカル信号ID→グローバル
-    /// 信号IDのリマップで、呼び出し元（インスタンス化した側）が入出力ポートの接続に使う。
+    /// 信号IDのリマップと、このスコープが直接持つインスタンスのリマップ
+    /// （呼び出し元がポート接続や、トップレベルなら`initial`の式構築に使う）。
     fn flatten_scope(
         &mut self,
         scope: &ResolvedScope,
         prefix: &str,
         modules: &HashMap<String, ResolvedModuleDef>,
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, InstanceRemaps) {
         let base = self.signals.len();
         for sig in &scope.signals {
             self.signals.push(NetlistSignal {
@@ -254,7 +265,7 @@ impl NetlistBuilder {
         for inst in &scope.instances {
             let module_def = &modules[&inst.module_name];
             let inst_prefix = scoped_name(prefix, &inst.instance_name);
-            let inst_remap = self.flatten_scope(&module_def.body, &inst_prefix, modules);
+            let (inst_remap, _) = self.flatten_scope(&module_def.body, &inst_prefix, modules);
 
             // 入力ポートへの接続を、外側スコープの式から合成の組み合わせDriveとして生成する
             for port in module_def.ports.iter().filter(|p| p.direction == Direction::Input) {
@@ -281,7 +292,7 @@ impl NetlistBuilder {
             }
         }
 
-        remap
+        (remap, instance_remaps)
     }
 
     /// 信号をDriveノードで駆動し、`NetlistSignal`の駆動情報を更新する
@@ -396,11 +407,24 @@ fn scoped_name(prefix: &str, name: &str) -> String {
 /// 今まで通り変更不要。
 pub fn build_netlist(elab: &Elaborated) -> Netlist {
     let mut builder = NetlistBuilder::new();
-    builder.flatten_scope(&elab.top, "", &elab.modules);
+    let (remap, instance_remaps) = builder.flatten_scope(&elab.top, "", &elab.modules);
+
+    let mut initial = Vec::new();
+    for step in &elab.initial {
+        let step = match step {
+            ResolvedProcStmt::Assign { target_id, expr } => {
+                let expr_node = builder.build_expr(expr, &remap, &instance_remaps, &elab.modules);
+                InitialStep::Assign { target: remap[*target_id], expr_node }
+            }
+            ResolvedProcStmt::Step => InitialStep::Step,
+        };
+        initial.push(step);
+    }
 
     Netlist {
         signals: builder.signals,
         nodes: builder.nodes,
+        initial,
     }
 }
 

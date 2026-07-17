@@ -107,6 +107,14 @@ impl Simulator {
     }
 }
 
+/// ノードを評価し、指定した幅にマスクする。
+///
+/// テストベンチの`initial`内`proc_assign`（`Simulator::step`を経由しない即時代入）が、
+/// 通常の代入と同じマスキング規則で信号値を設定するために使う。
+pub fn eval_and_mask(node_id: NodeId, nodes: &[Node], signal_values: &[u64], width: u64) -> u64 {
+    mask_to_width(eval_node(node_id, nodes, signal_values), width)
+}
+
 /// 値を信号のビット幅に切り詰める（幅が64以上ならそのまま）
 fn mask_to_width(value: u64, width: u64) -> u64 {
     if width >= 64 {

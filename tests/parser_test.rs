@@ -1,4 +1,4 @@
-use tinycerilte::ast::{BinOp, Direction, Expr, Stmt, UnOp};
+use tinycerilte::ast::{BinOp, Direction, Expr, ProcStmt, Stmt, UnOp};
 use tinycerilte::parser::Parser;
 
 fn parse(input: &str) -> tinycerilte::ast::Program {
@@ -465,4 +465,71 @@ fn trailing_unparseable_garbage_after_valid_program_is_error() {
     // programルールがEOIまで消費することを要求していないと、末尾の不正な入力が
     // 静かに無視されてしまう（過去に実際に発生したバグ）。EOIの強制でエラーになることを確認する。
     assert!(Parser::parse_program("{ var x: bit; } @@@invalid@@@").is_err());
+}
+
+#[test]
+fn testbench_def_parses_concurrent_and_initial_parts() {
+    let prog = parse(
+        "testbench tb { var clk: bit; clk <= !clk; initial { clk = 0; step; step; } }",
+    );
+    assert_eq!(prog.testbenches.len(), 1);
+    let tb = &prog.testbenches[0];
+    assert_eq!(tb.name, "tb");
+    assert_eq!(tb.decls.len(), 1);
+    assert_eq!(tb.stmts.len(), 1);
+    assert_eq!(tb.initial.len(), 3);
+}
+
+#[test]
+fn testbench_can_have_instance_decl() {
+    let prog = parse(
+        "testbench tb { var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }",
+    );
+    assert_eq!(prog.testbenches[0].instances.len(), 1);
+}
+
+#[test]
+fn testbench_without_initial_block_parses() {
+    let prog = parse("testbench tb { var clk: bit; clk <= !clk; }");
+    assert_eq!(prog.testbenches[0].initial.len(), 0);
+}
+
+#[test]
+fn initial_proc_assign_parses_as_assign_variant() {
+    let prog = parse("testbench tb { var x: bit<8>; initial { x = 3; } }");
+    match &prog.testbenches[0].initial[0] {
+        ProcStmt::Assign { target, expr } => {
+            assert_eq!(target, "x");
+            assert!(matches!(expr, Expr::Number(3)));
+        }
+        _ => panic!("Assignが期待される"),
+    }
+}
+
+#[test]
+fn initial_step_parses_as_step_variant() {
+    let prog = parse("testbench tb { initial { step; } }");
+    assert!(matches!(prog.testbenches[0].initial[0], ProcStmt::Step));
+}
+
+#[test]
+fn testbench_keyword_as_name_is_error() {
+    assert!(Parser::parse_program("testbench testbench { }").is_err());
+}
+
+#[test]
+fn initial_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("{ var initial: bit; }").is_err());
+}
+
+#[test]
+fn step_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("{ var step: bit; }").is_err());
+}
+
+#[test]
+fn multiple_testbenches_parse_but_are_rejected_later() {
+    // 文法上は複数書けてしまうが、「1つだけ」の制約はエラボレーションで検証する
+    let prog = parse("testbench a { } testbench b { }");
+    assert_eq!(prog.testbenches.len(), 2);
 }
