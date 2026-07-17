@@ -1,9 +1,17 @@
-program = { block+ }
-block   = { "{" ~ (decl | stmt)* ~ "}" }
-decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
-stmt    = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
-assign  = { "=" }
-nonblock= { "<=" }
+program = { SOI ~ (module_def | block)+ ~ EOI }
+
+module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
+port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
+port_decl  = { ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+direction  = { "input" | "output" }
+
+block     = { "{" ~ (decl | inst_decl | stmt)* ~ "}" }
+decl      = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+inst_decl = { "var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";" }
+named_arg = { ident ~ ":" ~ ternary_expr }
+stmt      = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
+assign    = { "=" }
+nonblock  = { "<=" }
 ternary_expr      = { expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)? }
 expression        = { expression1 ~ (or_op ~ expression1)* }
 expression1       = { expression2 ~ (and_op ~ expression2)* }
@@ -16,7 +24,8 @@ expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
 expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
 expression_unary  = { unary_op* ~ expression_factor }
-expression_factor = { ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
+expression_factor = { field_access | ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
+field_access      = { ident ~ "." ~ ident }
 
 or_op     = { "||" }
 and_op    = { "&&" }
@@ -39,3 +48,4 @@ radix          = { "b" | "o" | "d" | "h" }
 literal_digits = @{ ASCII_ALPHANUMERIC+ }
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }

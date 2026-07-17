@@ -1,5 +1,6 @@
-use crate::ast::{BinOp, UnOp};
-use crate::elaboration::{Elaborated, ResolvedExpr, ResolvedStmt};
+use crate::ast::{BinOp, Direction, UnOp};
+use crate::elaboration::{Elaborated, ResolvedExpr, ResolvedModuleDef, ResolvedScope, ResolvedStmt};
+use std::collections::HashMap;
 use std::fmt;
 
 /// ネットリスト中のノードID
@@ -128,9 +129,17 @@ pub struct NetlistSignal {
     pub kind: SignalKind,
 }
 
+/// スコープ内のインスタンス名 → (モジュール名, ローカル信号ID→グローバル信号IDのリマップ)
+type InstanceRemaps = HashMap<String, (String, Vec<usize>)>;
+
 /// ネットリストビルダー
+///
+/// `flatten_scope` がモジュール階層を再帰的に辿り、各スコープの信号にインスタンス名の
+/// プレフィックスを付けてフラットな `signals`/`nodes` へ展開する。展開が終われば
+/// `Node`/`NetlistSignal` はモジュールの存在を一切知らないフラットなDAGになる。
 pub struct NetlistBuilder {
     nodes: Vec<Node>,
+    signals: Vec<NetlistSignal>,
     next_id: NodeId,
 }
 
@@ -144,6 +153,7 @@ impl NetlistBuilder {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
+            signals: Vec::new(),
             next_id: 0,
         }
     }
@@ -216,8 +226,84 @@ impl NetlistBuilder {
         })
     }
 
+    /// スコープ（トップレベルまたはモジュール本体）をフラットな信号・ノードへ展開する
+    ///
+    /// `prefix`は展開後の信号名に付ける名前空間（トップレベルは空文字列、インスタンスは
+    /// `"u1"`のようなインスタンス名）。戻り値はこのスコープのローカル信号ID→グローバル
+    /// 信号IDのリマップで、呼び出し元（インスタンス化した側）が入出力ポートの接続に使う。
+    fn flatten_scope(
+        &mut self,
+        scope: &ResolvedScope,
+        prefix: &str,
+        modules: &HashMap<String, ResolvedModuleDef>,
+    ) -> Vec<usize> {
+        let base = self.signals.len();
+        for sig in &scope.signals {
+            self.signals.push(NetlistSignal {
+                id: base + sig.id,
+                name: scoped_name(prefix, &sig.name),
+                width: sig.width,
+                driver_node: None,
+                driver_kind: None,
+                kind: SignalKind::Wire,
+            });
+        }
+        let remap: Vec<usize> = (0..scope.signals.len()).map(|local| base + local).collect();
+
+        let mut instance_remaps: InstanceRemaps = HashMap::new();
+        for inst in &scope.instances {
+            let module_def = &modules[&inst.module_name];
+            let inst_prefix = scoped_name(prefix, &inst.instance_name);
+            let inst_remap = self.flatten_scope(&module_def.body, &inst_prefix, modules);
+
+            // 入力ポートへの接続を、外側スコープの式から合成の組み合わせDriveとして生成する
+            for port in module_def.ports.iter().filter(|p| p.direction == Direction::Input) {
+                let conn_expr = &inst.connections[&port.name];
+                let src = self.build_expr(conn_expr, &remap, &instance_remaps, modules);
+                self.drive_signal(inst_remap[port.signal_id], src, DriveKind::Combinational);
+            }
+
+            instance_remaps.insert(inst.instance_name.clone(), (inst.module_name.clone(), inst_remap));
+        }
+
+        for stmt in &scope.stmts {
+            match stmt {
+                ResolvedStmt::Combinational { target_id, expr } => {
+                    let src = self.build_expr(expr, &remap, &instance_remaps, modules);
+                    self.drive_signal(remap[*target_id], src, DriveKind::Combinational);
+                }
+                ResolvedStmt::Sequential { target_id, expr } => {
+                    let src = self.build_expr(expr, &remap, &instance_remaps, modules);
+                    let target_global = remap[*target_id];
+                    self.drive_signal(target_global, src, DriveKind::Sequential);
+                    self.signals[target_global].kind = SignalKind::Reg { clock: None, reset: None };
+                }
+            }
+        }
+
+        remap
+    }
+
+    /// 信号をDriveノードで駆動し、`NetlistSignal`の駆動情報を更新する
+    fn drive_signal(&mut self, target_global: usize, source: NodeId, kind: DriveKind) {
+        let name = self.signals[target_global].name.clone();
+        let width = self.signals[target_global].width;
+        let drive = self.make_drive(target_global, &name, source, kind, width);
+        self.signals[target_global].driver_node = Some(drive);
+        self.signals[target_global].driver_kind = Some(kind);
+    }
+
     /// 式のノードを構築し、その結果のNodeIdを返す
-    fn build_expr(&mut self, expr: &ResolvedExpr, signals: &[NetlistSignal]) -> NodeId {
+    ///
+    /// `remap`は現在のスコープのローカル信号ID→グローバル信号IDのリマップ、
+    /// `instance_remaps`は現在のスコープが直接持つインスタンスのリマップ（`InstanceField`の解決に使う）。
+    fn build_expr(
+        &mut self,
+        expr: &ResolvedExpr,
+        remap: &[usize],
+        instance_remaps: &InstanceRemaps,
+        modules: &HashMap<String, ResolvedModuleDef>,
+    ) -> NodeId {
         match expr {
             ResolvedExpr::Number(n) => {
                 // 最小幅を計算（0の場合は1ビット）
@@ -232,12 +318,27 @@ impl NetlistBuilder {
                 self.make_const(masked, *width)
             }
             ResolvedExpr::Ident(signal_id) => {
-                let sig = &signals[*signal_id];
-                self.make_read_signal(*signal_id, &sig.name, sig.width)
+                let global = remap[*signal_id];
+                let name = self.signals[global].name.clone();
+                let width = self.signals[global].width;
+                self.make_read_signal(global, &name, width)
+            }
+            ResolvedExpr::InstanceField { instance_name, port_name } => {
+                let (module_name, inst_remap) = &instance_remaps[instance_name];
+                let module_def = &modules[module_name];
+                let port = module_def
+                    .ports
+                    .iter()
+                    .find(|p| &p.name == port_name)
+                    .expect("解決済みのInstanceFieldは常に実在するポートを参照する");
+                let global = inst_remap[port.signal_id];
+                let name = self.signals[global].name.clone();
+                let width = self.signals[global].width;
+                self.make_read_signal(global, &name, width)
             }
             ResolvedExpr::BinOp { op, lhs, rhs } => {
-                let lhs_id = self.build_expr(lhs, signals);
-                let rhs_id = self.build_expr(rhs, signals);
+                let lhs_id = self.build_expr(lhs, remap, instance_remaps, modules);
+                let rhs_id = self.build_expr(rhs, remap, instance_remaps, modules);
                 let lhs_width = self.node_width(lhs_id);
                 let rhs_width = self.node_width(rhs_id);
                 // 論理・比較演算の結果は真偽値（1ビット）、それ以外は両オペランドの大きい方
@@ -248,7 +349,7 @@ impl NetlistBuilder {
                 self.make_binop(*op, lhs_id, rhs_id, width)
             }
             ResolvedExpr::UnaryOp { op, expr } => {
-                let operand_id = self.build_expr(expr, signals);
+                let operand_id = self.build_expr(expr, remap, instance_remaps, modules);
                 // 論理否定の結果は真偽値（1ビット）、ビット反転はオペランドと同じ幅
                 let width = match op {
                     UnOp::Not => 1,
@@ -257,9 +358,9 @@ impl NetlistBuilder {
                 self.make_unaryop(*op, operand_id, width)
             }
             ResolvedExpr::Ternary { cond, then_branch, else_branch } => {
-                let cond_id = self.build_expr(cond, signals);
-                let then_id = self.build_expr(then_branch, signals);
-                let else_id = self.build_expr(else_branch, signals);
+                let cond_id = self.build_expr(cond, remap, instance_remaps, modules);
+                let then_id = self.build_expr(then_branch, remap, instance_remaps, modules);
+                let else_id = self.build_expr(else_branch, remap, instance_remaps, modules);
                 // 結果の幅はthen/elseの大きい方（condは選択にのみ使い、幅には影響しない）
                 let width = self.node_width(then_id).max(self.node_width(else_id));
                 self.make_ternary(cond_id, then_id, else_id, width)
@@ -279,47 +380,26 @@ impl NetlistBuilder {
     }
 }
 
-/// エラボレーション結果からネットリストを生成する
-pub fn build_netlist(elab: &Elaborated) -> Netlist {
-    // 信号リストを作成
-    let mut signals: Vec<NetlistSignal> = elab
-        .signals
-        .iter()
-        .map(|s| NetlistSignal {
-            id: s.id,
-            name: s.name.clone(),
-            width: s.width,
-            driver_node: None,
-            driver_kind: None,
-            kind: SignalKind::Wire,
-        })
-        .collect();
-
-    let mut builder = NetlistBuilder::new();
-
-    // 各文からノード構築
-    for stmt in &elab.stmts {
-        match stmt {
-            ResolvedStmt::Combinational { target_id, expr } => {
-                let sig = &signals[*target_id];
-                let src = builder.build_expr(expr, &signals);
-                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Combinational, sig.width);
-                signals[*target_id].driver_node = Some(drive);
-                signals[*target_id].driver_kind = Some(DriveKind::Combinational);
-            }
-            ResolvedStmt::Sequential { target_id, expr } => {
-                let sig = &signals[*target_id];
-                let src = builder.build_expr(expr, &signals);
-                let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Sequential, sig.width);
-                signals[*target_id].driver_node = Some(drive);
-                signals[*target_id].driver_kind = Some(DriveKind::Sequential);
-                signals[*target_id].kind = SignalKind::Reg { clock: None, reset: None };
-            }
-        }
+/// 信号名に名前空間プレフィックスを付ける（トップレベルはプレフィックス無し）
+fn scoped_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
     }
+}
+
+/// エラボレーション結果からネットリストを生成する
+///
+/// モジュール階層はここで再帰的にフラット化される（`NetlistBuilder::flatten_scope`）。
+/// 展開後の`Node`/`NetlistSignal`はモジュールの存在を知らないため、`Simulator`は
+/// 今まで通り変更不要。
+pub fn build_netlist(elab: &Elaborated) -> Netlist {
+    let mut builder = NetlistBuilder::new();
+    builder.flatten_scope(&elab.top, "", &elab.modules);
 
     Netlist {
-        signals,
+        signals: builder.signals,
         nodes: builder.nodes,
     }
 }

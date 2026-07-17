@@ -79,17 +79,24 @@ fn run_parse_phase(source: &str) -> Program {
         std::process::exit(1);
     });
 
-    println!("  OK: {} block(s)", prog.blocks.len());
+    println!("  OK: {} module(s), {} block(s)", prog.modules.len(), prog.blocks.len());
+    for m in &prog.modules {
+        println!("  Module {}: {} port(s), {} decl(s), {} stmt(s)", m.name, m.ports.len(), m.decls.len(), m.stmts.len());
+    }
     for (i, block) in prog.blocks.iter().enumerate() {
         println!(
-            "  Block {}: {} decl(s), {} stmt(s)",
+            "  Block {}: {} decl(s), {} instance(s), {} stmt(s)",
             i,
             block.decls.len(),
+            block.instances.len(),
             block.stmts.len()
         );
         for decl in &block.decls {
             let width_str = decl.width.map(|w| format!("[{w}]")).unwrap_or_default();
             println!("    decl: {}: bit{}", decl.name, width_str);
+        }
+        for inst in &block.instances {
+            println!("    inst: {} = {}(...)", inst.instance_name, inst.module_name);
         }
         for stmt in &block.stmts {
             match stmt {
@@ -113,8 +120,8 @@ fn run_elaboration_phase(prog: &Program) -> Elaborated {
         std::process::exit(1);
     });
 
-    println!("  OK: {} signal(s), {} stmt(s)", elab.signals.len(), elab.stmts.len());
-    for sig in &elab.signals {
+    println!("  OK: {} module(s), {} signal(s), {} stmt(s)", elab.modules.len(), elab.top.signals.len(), elab.top.stmts.len());
+    for sig in &elab.top.signals {
         println!("  signal {}: {} ({} bit)", sig.id, sig.name, sig.width);
     }
     elab

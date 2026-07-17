@@ -1,16 +1,50 @@
 use std::fmt;
 
-/// プログラム全体（現状は1ブロックのみ）
+/// プログラム全体（トップレベルのブロックとモジュール定義）
 #[derive(Debug, Clone)]
 pub struct Program {
     pub blocks: Vec<Block>,
+    pub modules: Vec<ModuleDef>,
 }
 
 /// ブロック
 #[derive(Debug, Clone)]
 pub struct Block {
     pub decls: Vec<Decl>,
+    pub instances: Vec<InstDecl>,
     pub stmts: Vec<Stmt>,
+}
+
+/// ポートの向き
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Input,
+    Output,
+}
+
+/// ポート宣言 `name: input/output bit<N>;`
+#[derive(Debug, Clone)]
+pub struct PortDecl {
+    pub name: String,
+    pub direction: Direction,
+    pub width: Option<u64>,
+}
+
+/// モジュール定義
+#[derive(Debug, Clone)]
+pub struct ModuleDef {
+    pub name: String,
+    pub ports: Vec<PortDecl>,
+    pub decls: Vec<Decl>,
+    pub stmts: Vec<Stmt>,
+}
+
+/// モジュールインスタンス化宣言 `var name = module_name(port: expr, ...);`
+#[derive(Debug, Clone)]
+pub struct InstDecl {
+    pub instance_name: String,
+    pub module_name: String,
+    pub args: Vec<(String, Expr)>,
 }
 
 /// 変数宣言
@@ -60,6 +94,11 @@ pub enum Expr {
     BitVecLiteral {
         width: u64,
         value: u64,
+    },
+    /// モジュールインスタンスの出力ポート参照 `instance.field`
+    FieldAccess {
+        instance: String,
+        field: String,
     },
     /// 二項演算
     BinOp {

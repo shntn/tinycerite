@@ -6,11 +6,11 @@ fn elaborated_signals_have_correct_names_and_widths() {
     let prog = Parser::parse_program("{ var a: bit; var b: bit<16>; }")
         .unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
-    assert_eq!(elab.signals.len(), 2);
-    assert_eq!(elab.signals[0].name, "a");
-    assert_eq!(elab.signals[0].width, 1);
-    assert_eq!(elab.signals[1].name, "b");
-    assert_eq!(elab.signals[1].width, 16);
+    assert_eq!(elab.top.signals.len(), 2);
+    assert_eq!(elab.top.signals[0].name, "a");
+    assert_eq!(elab.top.signals[0].width, 1);
+    assert_eq!(elab.top.signals[1].name, "b");
+    assert_eq!(elab.top.signals[1].width, 16);
 }
 
 #[test]
@@ -18,10 +18,10 @@ fn elaborated_stmts_preserve_assign_kind() {
     let prog = Parser::parse_program("{ var a: bit; var b: bit; a = b ^ 1; b <= a; }")
         .unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
-    assert_eq!(elab.stmts.len(), 2);
+    assert_eq!(elab.top.stmts.len(), 2);
     // combinatorial: target_id は a (id=0), sequential: target_id は b (id=1)
-    assert!(matches!(elab.stmts[0], elaboration::ResolvedStmt::Combinational { target_id: 0, .. }));
-    assert!(matches!(elab.stmts[1], elaboration::ResolvedStmt::Sequential { target_id: 1, .. }));
+    assert!(matches!(elab.top.stmts[0], elaboration::ResolvedStmt::Combinational { target_id: 0, .. }));
+    assert!(matches!(elab.top.stmts[1], elaboration::ResolvedStmt::Sequential { target_id: 1, .. }));
 }
 
 #[test]
@@ -80,4 +80,141 @@ fn signal_declared_in_later_block_is_visible_to_earlier_block_stmt() {
         elaboration::elaborate(&prog).is_ok(),
         "ブロックをまたいでも名前空間はフラットに共有される"
     );
+}
+
+fn adder_src() -> &'static str {
+    "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; }"
+}
+
+#[test]
+fn module_instantiation_resolves_successfully() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var y: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: y); z = u1.sum; }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    let elab = elaboration::elaborate(&prog).unwrap();
+    assert_eq!(elab.modules.len(), 1);
+    assert_eq!(elab.top.instances.len(), 1);
+    assert_eq!(elab.top.instances[0].instance_name, "u1");
+    assert_eq!(elab.top.instances[0].connections.len(), 2);
+}
+
+#[test]
+fn duplicate_module_definition_is_error() {
+    let src = format!("{} {}", adder_src(), adder_src());
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("重複"), "エラー: {}", err.message);
+}
+
+#[test]
+fn duplicate_port_name_is_error() {
+    let prog = Parser::parse_program(
+        "module m { port { a: input bit; a: output bit; } }",
+    )
+    .unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("重複"), "エラー: {}", err.message);
+}
+
+#[test]
+fn assigning_to_input_port_inside_module_is_error() {
+    let prog = Parser::parse_program(
+        "module m { port { a: input bit; b: output bit; } a = 1; b = a; }",
+    )
+    .unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("入力ポート"), "エラー: {}", err.message);
+}
+
+#[test]
+fn unused_module_body_is_still_validated() {
+    // インスタンス化されなくても、モジュール定義自体は宣言時点で検証される
+    let prog = Parser::parse_program(
+        "module m { port { a: input bit; b: output bit; } b = c; }",
+    )
+    .unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("c"), "エラー: {}", err.message);
+}
+
+#[test]
+fn instantiating_undefined_module_is_error() {
+    let prog = Parser::parse_program("{ var u1 = ghost(); }").unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("ghost"), "エラー: {}", err.message);
+}
+
+#[test]
+fn missing_input_connection_is_error() {
+    let src = format!("{} {{ var x: bit<8>; var u1 = adder(a: x); }}", adder_src());
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("b"), "エラー: {}", err.message);
+}
+
+#[test]
+fn connecting_output_port_as_argument_is_error() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x, sum: z); }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("出力ポート"), "エラー: {}", err.message);
+}
+
+#[test]
+fn unknown_port_name_as_argument_is_error() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var u1 = adder(a: x, b: x, ghost: x); }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("ghost"), "エラー: {}", err.message);
+}
+
+#[test]
+fn instance_name_colliding_with_signal_name_is_error() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var x = adder(a: x, b: x); }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    assert!(elaboration::elaborate(&prog).is_err());
+}
+
+#[test]
+fn reading_input_port_field_from_outside_is_error() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.a; }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("入力ポート"), "エラー: {}", err.message);
+}
+
+#[test]
+fn reading_nonexistent_field_is_error() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.ghost; }}",
+        adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    let err = elaboration::elaborate(&prog).unwrap_err();
+    assert!(err.message.contains("ghost"), "エラー: {}", err.message);
+}
+
+#[test]
+fn instance_output_can_feed_another_instance_input() {
+    // 同じスコープ内で、あるインスタンスの出力を別のインスタンスの入力に接続できる
+    let src = format!(
+        "{adder} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: u1.sum, b: x); z = u2.sum; }}",
+        adder = adder_src()
+    );
+    let prog = Parser::parse_program(&src).unwrap();
+    assert!(elaboration::elaborate(&prog).is_ok());
 }

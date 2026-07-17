@@ -1,4 +1,4 @@
-use tinycerilte::ast::{BinOp, Expr, Stmt, UnOp};
+use tinycerilte::ast::{BinOp, Direction, Expr, Stmt, UnOp};
 use tinycerilte::parser::Parser;
 
 fn parse(input: &str) -> tinycerilte::ast::Program {
@@ -345,4 +345,124 @@ fn not_equal_operator_is_unaffected_by_unary_not() {
         }
         _ => panic!("comb assign が期待される"),
     }
+}
+
+#[test]
+fn module_def_parses_ports_and_body() {
+    let prog = parse(
+        "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; }",
+    );
+    assert_eq!(prog.modules.len(), 1);
+    let m = &prog.modules[0];
+    assert_eq!(m.name, "adder");
+    assert_eq!(m.ports.len(), 3);
+    assert_eq!(m.ports[0].name, "a");
+    assert_eq!(m.ports[0].direction, Direction::Input);
+    assert_eq!(m.ports[0].width, Some(8));
+    assert_eq!(m.ports[2].name, "sum");
+    assert_eq!(m.ports[2].direction, Direction::Output);
+    assert_eq!(m.stmts.len(), 1);
+}
+
+#[test]
+fn module_def_can_have_internal_decls() {
+    let prog = parse(
+        "module m { port { a: input bit; } var internal: bit; internal = a; }",
+    );
+    let m = &prog.modules[0];
+    assert_eq!(m.decls.len(), 1);
+    assert_eq!(m.decls[0].name, "internal");
+}
+
+#[test]
+fn multiple_modules_and_blocks_can_coexist() {
+    let prog = parse(
+        "module a { port {} } { var x: bit; } module b { port {} } { var y: bit; }",
+    );
+    assert_eq!(prog.modules.len(), 2);
+    assert_eq!(prog.blocks.len(), 2);
+}
+
+#[test]
+fn instance_decl_parses_with_named_args() {
+    let prog = parse(
+        "{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }",
+    );
+    let inst = &prog.blocks[0].instances[0];
+    assert_eq!(inst.instance_name, "u1");
+    assert_eq!(inst.module_name, "adder");
+    assert_eq!(inst.args.len(), 2);
+    assert_eq!(inst.args[0].0, "a");
+    assert!(matches!(inst.args[0].1, Expr::Ident(ref name) if name == "x"));
+}
+
+#[test]
+fn instance_decl_with_no_args_parses() {
+    let prog = parse("{ var u1 = m(); }");
+    assert_eq!(prog.blocks[0].instances[0].args.len(), 0);
+}
+
+#[test]
+fn field_access_parses_as_expr() {
+    let prog = parse("{ var z: bit<8>; var u1 = adder(); z = u1.sum; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::FieldAccess { instance, field } if instance == "u1" && field == "sum"));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn field_access_usable_inside_larger_expression() {
+    assert!(Parser::parse_program("{ var z: bit<8>; var u1 = adder(); z = u1.sum + 1; }").is_ok());
+}
+
+#[test]
+fn module_keyword_as_module_name_is_error() {
+    assert!(Parser::parse_program("module module { port {} }").is_err());
+}
+
+#[test]
+fn input_keyword_as_port_name_is_error() {
+    assert!(Parser::parse_program("module m { port { input: input bit; } }").is_err());
+}
+
+#[test]
+fn output_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("{ var output: bit; }").is_err());
+}
+
+#[test]
+fn port_without_direction_is_error() {
+    assert!(Parser::parse_program("module m { port { a: bit; } }").is_err());
+}
+
+#[test]
+fn module_cannot_contain_instance_decl() {
+    // モジュール本体はネストしたインスタンス化を許可しない（文法レベルで弾く）
+    assert!(Parser::parse_program(
+        "module m { port {} var u1 = other(); }"
+    )
+    .is_err());
+}
+
+#[test]
+fn line_comment_is_ignored_between_statements() {
+    let prog = parse("{ var x: bit; // これはコメント\n x = 1; }");
+    assert_eq!(prog.blocks[0].stmts.len(), 1);
+}
+
+#[test]
+fn line_comment_at_end_of_line_is_ignored() {
+    let prog = parse("{ var x: bit; x = 1; // 行末コメント\n }");
+    assert_eq!(prog.blocks[0].stmts.len(), 1);
+}
+
+#[test]
+fn trailing_unparseable_garbage_after_valid_program_is_error() {
+    // programルールがEOIまで消費することを要求していないと、末尾の不正な入力が
+    // 静かに無視されてしまう（過去に実際に発生したバグ）。EOIの強制でエラーになることを確認する。
+    assert!(Parser::parse_program("{ var x: bit; } @@@invalid@@@").is_err());
 }

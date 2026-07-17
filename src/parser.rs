@@ -6,7 +6,7 @@ use crate::ast::*;
 
 /// キーワードとして予約されている識別子
 fn is_keyword(s: &str) -> bool {
-    matches!(s, "var" | "bit")
+    matches!(s, "var" | "bit" | "module" | "port" | "input" | "output")
 }
 
 /// pest パーサー（grammar.pest から自動生成）
@@ -46,32 +46,167 @@ impl Parser {
     pub fn parse_program(input: &str) -> Result<Program> {
         let pairs = CeriteParser::parse(Rule::program, input)?;
         let mut blocks = Vec::new();
+        let mut modules = Vec::new();
         for pair in pairs {
             if pair.as_rule() == Rule::program {
-                for block_pair in pair.into_inner() {
-                    if block_pair.as_rule() == Rule::block {
-                        blocks.push(parse_block(block_pair)?);
+                for item_pair in pair.into_inner() {
+                    match item_pair.as_rule() {
+                        Rule::block => blocks.push(parse_block(item_pair)?),
+                        Rule::module_def => modules.push(parse_module_def(item_pair)?),
+                        _ => {}
                     }
                 }
             }
         }
-        Ok(Program { blocks })
+        Ok(Program { blocks, modules })
     }
 }
 
 fn parse_block(pair: Pair<Rule>) -> Result<Block> {
     let mut decls = Vec::new();
+    let mut instances = Vec::new();
     let mut stmts = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::decl => decls.push(parse_decl(inner)?),
+            Rule::inst_decl => instances.push(parse_inst_decl(inner)?),
+            Rule::stmt => stmts.push(parse_stmt(inner)?),
+            _ => {} // "{" "}" などは無視
+        }
+    }
+
+    Ok(Block { decls, instances, stmts })
+}
+
+/// `module_def`（`"module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}"`）をパースする
+fn parse_module_def(pair: Pair<Rule>) -> Result<ModuleDef> {
+    let mut name = String::new();
+    let mut ports = Vec::new();
+    let mut decls = Vec::new();
+    let mut stmts = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+                if is_keyword(&name) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードでありモジュール名に使えません", name),
+                    });
+                }
+            }
+            Rule::port_block => ports = parse_port_block(inner)?,
             Rule::decl => decls.push(parse_decl(inner)?),
             Rule::stmt => stmts.push(parse_stmt(inner)?),
             _ => {} // "{" "}" などは無視
         }
     }
 
-    Ok(Block { decls, stmts })
+    Ok(ModuleDef { name, ports, decls, stmts })
+}
+
+/// `port_block`（`"port" ~ "{" ~ port_decl* ~ "}"`）をパースする
+fn parse_port_block(pair: Pair<Rule>) -> Result<Vec<PortDecl>> {
+    let mut ports = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::port_decl {
+            ports.push(parse_port_decl(inner)?);
+        }
+    }
+    Ok(ports)
+}
+
+/// `port_decl`（`ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";"`）をパースする
+fn parse_port_decl(pair: Pair<Rule>) -> Result<PortDecl> {
+    let mut name = String::new();
+    let mut direction = None;
+    let mut width = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+                if is_keyword(&name) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードでありポート名に使えません", name),
+                    });
+                }
+            }
+            Rule::direction => {
+                direction = Some(match inner.as_str() {
+                    "input" => Direction::Input,
+                    "output" => Direction::Output,
+                    _ => unreachable!("direction は input か output のみ"),
+                });
+            }
+            Rule::number => {
+                width = Some(inner.as_str().parse::<u64>().map_err(|e| ParseError {
+                    message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
+                })?);
+            }
+            _ => {} // ":" "bit" "<" ">" ";" は無視
+        }
+    }
+
+    let direction = direction.ok_or_else(|| ParseError {
+        message: "ポートの向き（input/output）が見つかりません".to_string(),
+    })?;
+
+    Ok(PortDecl { name, direction, width })
+}
+
+/// `inst_decl`（`"var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";"`）をパースする
+fn parse_inst_decl(pair: Pair<Rule>) -> Result<InstDecl> {
+    let mut instance_name = None;
+    let mut module_name = None;
+    let mut args = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident if instance_name.is_none() => {
+                let name = inner.as_str().to_string();
+                if is_keyword(&name) {
+                    return Err(ParseError {
+                        message: format!("'{}' はキーワードでありインスタンス名に使えません", name),
+                    });
+                }
+                instance_name = Some(name);
+            }
+            Rule::ident => module_name = Some(inner.as_str().to_string()),
+            Rule::named_arg => args.push(parse_named_arg(inner)?),
+            _ => {} // "var" "=" "(" ")" ";" は無視
+        }
+    }
+
+    let instance_name = instance_name.ok_or_else(|| ParseError {
+        message: "インスタンス名が見つかりません".to_string(),
+    })?;
+    let module_name = module_name.ok_or_else(|| ParseError {
+        message: "モジュール名が見つかりません".to_string(),
+    })?;
+
+    Ok(InstDecl { instance_name, module_name, args })
+}
+
+/// `named_arg`（`ident ~ ":" ~ ternary_expr`）をパースする
+fn parse_named_arg(pair: Pair<Rule>) -> Result<(String, Expr)> {
+    let mut name = String::new();
+    let mut expr = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => name = inner.as_str().to_string(),
+            Rule::ternary_expr => expr = Some(parse_ternary_expr(inner)?),
+            _ => {}
+        }
+    }
+
+    let expr = expr.ok_or_else(|| ParseError {
+        message: "名前付き引数の式が見つかりません".to_string(),
+    })?;
+
+    Ok((name, expr))
 }
 
 fn parse_decl(pair: Pair<Rule>) -> Result<Decl> {
@@ -315,11 +450,31 @@ fn parse_expression_factor(pair: Pair<Rule>) -> Result<Expr> {
             Ok(Expr::Number(n))
         }
         Rule::bitvec_literal => parse_bitvec_literal(inner),
+        Rule::field_access => parse_field_access(inner),
         Rule::ternary_expr => parse_ternary_expr(inner),
         _ => Err(ParseError {
             message: format!("式の項として予期しないルール: {:?}", inner.as_rule()),
         }),
     }
+}
+
+/// `field_access`（`ident ~ "." ~ ident`）を `Expr::FieldAccess` に変換する
+fn parse_field_access(pair: Pair<Rule>) -> Result<Expr> {
+    let mut idents = pair.into_inner();
+    let instance = idents.next().ok_or_else(|| ParseError {
+        message: "インスタンス名が見つかりません".to_string(),
+    })?.as_str().to_string();
+    let field = idents.next().ok_or_else(|| ParseError {
+        message: "フィールド名が見つかりません".to_string(),
+    })?.as_str().to_string();
+
+    if is_keyword(&instance) || is_keyword(&field) {
+        return Err(ParseError {
+            message: format!("'{}.{}' にキーワードは使えません", instance, field),
+        });
+    }
+
+    Ok(Expr::FieldAccess { instance, field })
 }
 
 /// `bitvec_literal`（`number ~ "'" ~ radix ~ literal_digits`）をパースする

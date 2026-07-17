@@ -7,10 +7,10 @@ tinycerilte は最小の HDL シミュレータ。入出力は以下。
 Source (.tc)
   ↓ Parser (pest) — 字句解析 + 構文解析
 AST (Program)
-  ↓ Elaboration — シンボル解決・型解決 + 静的チェック
-Elaborated IR
-  ↓ Netlist Builder — DAG構築
-Netlist (信号DAG)
+  ↓ Elaboration — モジュール定義解決・シンボル解決・型解決 + 静的チェック
+Elaborated IR（モジュール階層を保持）
+  ↓ Netlist Builder — モジュール階層をフラットなDAGへ展開
+Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
   ↓ Simulator — Δ-サイクル評価
 波形出力
 ```
@@ -22,9 +22,19 @@ Netlist (信号DAG)
 ## 文法 (EBNF)
 
 ```
-program     = block+
-block       = "{" (decl | stmt)* "}"
+program     = (module_def | block)+
+
+# モジュール定義
+module_def  = "module" ident "{" port_block (decl | stmt)* "}"
+port_block  = "port" "{" port_decl* "}"
+port_decl   = ident ":" ("input" | "output") "bit" ("<" number ">")? ";"
+
+block       = "{" (decl | inst_decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
+# モジュールインスタンス化（トップレベルのブロック内のみ。モジュール本体はネスト不可）
+inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
+named_arg   = ident ":" ternary_expr
+
 stmt        = ident ("=" | "<=") ternary_expr ";"
 
 # 三項演算子（右結合、演算子の中で最も優先度が低い）
@@ -42,7 +52,8 @@ expression7       = expression8 (("<<<" | "<<" | ">>>" | ">>") expression8)*
 expression8       = expression9 (("+" | "-") expression9)*
 expression9       = expression_unary (("*" | "/" | "%") expression_unary)*
 expression_unary  = ("!" | "~")* expression_factor
-expression_factor = ident | bitvec_literal | number | "(" ternary_expr ")"
+expression_factor = field_access | ident | bitvec_literal | number | "(" ternary_expr ")"
+field_access      = ident "." ident   # instance.output_port
 
 ident          = [a-zA-Z_][a-zA-Z0-9_]*
 number         = [0-9]+
@@ -57,6 +68,9 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
 - `cond ? then_branch : else_branch` — 三項演算子（条件式）。すべての演算子の中で最も優先度が低く、右結合（`a ? b : c ? d : e` は `a ? b : (c ? d : e)`）。`cond` が0以外なら `then_branch`、0なら `else_branch` を選択する。ハードウェア的にはマルチプレクサなので、選ばれなかった分岐も含めて両方が常に評価される（0除算などの副作用があっても選択に関わらず発生する）。結果幅は `then_branch`/`else_branch` の大きい方（`cond` は選択にのみ使われ幅には影響しない）
+- `module name { port { ... } (var宣言 | 代入文)* }` — モジュール定義。`port { }` ブロックに入出力ポート（`input`/`output`）を宣言し、続けて内部信号の宣言・代入文を書く。`input` ポートへの内部代入はエラー。モジュール定義は宣言された時点で（インスタンス化の有無によらず）1回だけ解決・検証される
+- `var 名前 = モジュール名(ポート名: 式, ...);` — モジュールインスタンス化。`input` ポートだけを名前付き引数として接続する（構造体リテラルではなく関数呼び出し風の構文）。全`input`ポート分の接続が必須で、過不足・`output`ポートの指定はエラー
+- `インスタンス名.出力ポート名` — インスタンスの出力を式の中で読み出す（例: `z = u1.sum + 1;`）。`input`ポートを外部から読み出そうとするとエラー
 - 演算子（優先度が高い順）:
   1. `!` `~` — 前置単項演算子。論理否定（`!`、結果は1ビットの真偽値）とビット反転（`~`、結果はオペランドと同じ幅）。連続して書ける（例: `!!a`、右結合で内側から適用）
   2. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
@@ -84,6 +98,34 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 
 この回路はトグルフリップフロップ（TFF）として動作し、a は2サイクルごとに 1→0 を繰り返す。
 
+## モジュールの例
+
+```
+module adder {
+    port {
+        a: input bit<8>;
+        b: input bit<8>;
+        sum: output bit<8>;
+    }
+
+    sum <= a + b;
+}
+
+{
+    var x: bit<8>;
+    var y: bit<8>;
+    var z: bit<8>;
+
+    var u1 = adder(a: x, b: y);   // inputポートだけを名前付き引数で接続
+    z = u1.sum;                    // outputポートはインスタンスから読み出す
+}
+```
+
+現状の制限:
+
+- モジュールが別のモジュールをインスタンス化すること（ネスト）は未対応（文法上、`inst_decl` はトップレベルの `block` にのみ許可されている）
+- インスタンス境界をまたぐ組合せループ（あるインスタンスの出力を同じインスタンスの入力に戻すような配線）はエラボレーション時点では検出できない。詳細は後述の `elaboration` モジュール節を参照
+
 ---
 
 # モジュール一覧
@@ -110,15 +152,17 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 
 `Program` :
 
-- 役割: パース結果のトップレベル。0個以上の Block を持つ。
+- 役割: パース結果のトップレベル。0個以上の Block とモジュール定義を持つ。
 - フィールド:
   - `blocks: Vec<Block>` — プログラム中のブロックのリスト
+  - `modules: Vec<ModuleDef>` — プログラム中のモジュール定義のリスト
 
 `Block` :
 
-- 役割: `{ ... }` で囲まれた1つのスコープ。宣言と代入文の列。
+- 役割: `{ ... }` で囲まれた1つのスコープ。宣言・モジュールインスタンス化・代入文の列。
 - フィールド:
   - `decls: Vec<Decl>` — 変数宣言のリスト
+  - `instances: Vec<InstDecl>` — モジュールインスタンス化のリスト
   - `stmts: Vec<Stmt>` — 代入文のリスト
 
 `Decl` :
@@ -127,6 +171,36 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 - フィールド:
   - `name: String` — 変数名
   - `width: Option<u64>` — ビット幅。`None` = `bit`（1ビット）、`Some(n)` = `bit<n>`（Nビット）
+
+`Direction` (enum) :
+
+- 役割: ポートの向き。
+- バリアント: `Input` `Output`
+
+`PortDecl` :
+
+- 役割: `name: input/output bit<N>;` によるポート宣言（モジュール定義の`port { }`ブロック内）。
+- フィールド:
+  - `name: String` — ポート名
+  - `direction: Direction` — 向き
+  - `width: Option<u64>` — ビット幅（`Decl`と同じ規則）
+
+`ModuleDef` :
+
+- 役割: `module name { port { ... } ... }` によるモジュール定義。
+- フィールド:
+  - `name: String` — モジュール名
+  - `ports: Vec<PortDecl>` — ポート宣言のリスト
+  - `decls: Vec<Decl>` — モジュール内部の変数宣言のリスト
+  - `stmts: Vec<Stmt>` — モジュール内部の代入文のリスト
+
+`InstDecl` :
+
+- 役割: `var name = module_name(port: expr, ...);` によるモジュールインスタンス化宣言。
+- フィールド:
+  - `instance_name: String` — インスタンス名
+  - `module_name: String` — インスタンス化するモジュール名
+  - `args: Vec<(String, Expr)>` — 名前付き引数（`inputポート名, 接続式`）のリスト
 
 `Stmt` (enum) :
 
@@ -152,6 +226,9 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
   - `BitVecLiteral { width: u64, value: u64 }` — ビットベクタリテラル（例: `4'b1010`、`8'hFF`）。`Number`と異なり幅を明示する
     - `width` — 明示された幅
     - `value` — パース済みの値（基数変換後。宣言幅に収まらない場合、幅への切り詰めはネットリスト構築時に行う）
+  - `FieldAccess { instance: String, field: String }` — モジュールインスタンスの出力ポート参照（例: `u1.sum`）
+    - `instance` — インスタンス名
+    - `field` — 参照するポート名
   - `BinOp { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> }` — 二項演算
     - `op` — 演算子の種類
     - `lhs` — 左辺の式
@@ -209,13 +286,36 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 - 概要: 入力文字列をパースし、`Program` を返す。
 - 処理:
   1. `CeriteParser::parse(Rule::program, input)` を呼び、pest の `Pairs` を得る
-  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` を抽出
-  3. 各ブロックを `parse_block()` で AST に変換
+  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` → `parse_block()`、`Rule::module_def` → `parse_module_def()` に振り分けて `Program` を構築
 
 `parse_block(pair: Pair<Rule>) -> Result<Block>` :
 
 - 概要: `block` ルールのペアから `Block` を構築。
-- 処理: 子ペアを走査し、`Rule::decl` → `parse_decl()`、`Rule::stmt` → `parse_stmt()` に振り分け。
+- 処理: 子ペアを走査し、`Rule::decl` → `parse_decl()`、`Rule::inst_decl` → `parse_inst_decl()`、`Rule::stmt` → `parse_stmt()` に振り分け。
+
+`parse_module_def(pair: Pair<Rule>) -> Result<ModuleDef>` :
+
+- 概要: `module_def`（`"module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}"`）から `ModuleDef` を構築。
+- 処理: 子ペアから `Rule::ident` → モジュール名（`is_keyword`でキーワード検査）、`Rule::port_block` → `parse_port_block()`、`Rule::decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_stmt()` に振り分け。
+
+`parse_port_block(pair: Pair<Rule>) -> Result<Vec<PortDecl>>` :
+
+- 概要: `port_block`（`"port" ~ "{" ~ port_decl* ~ "}"`）から `PortDecl` のリストを構築。
+- 処理: 子ペアの `Rule::port_decl` をそれぞれ `parse_port_decl()` で変換。
+
+`parse_port_decl(pair: Pair<Rule>) -> Result<PortDecl>` :
+
+- 概要: `port_decl`（`ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";"`）から `PortDecl` を構築。
+- 処理: 子ペアから `Rule::ident` → ポート名（`is_keyword`でキーワード検査）、`Rule::direction` → `input`→`Direction::Input`、`output`→`Direction::Output`、`Rule::number` → ビット幅（存在すれば）を抽出。
+
+`parse_inst_decl(pair: Pair<Rule>) -> Result<InstDecl>` :
+
+- 概要: `inst_decl`（`"var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";"`）から `InstDecl` を構築。
+- 処理: 子ペアの `Rule::ident` を出現順に走査し、1つ目をインスタンス名（`is_keyword`でキーワード検査）、2つ目をモジュール名として扱う。`Rule::named_arg` はそれぞれ `parse_named_arg()` で変換して `args` に集める。
+
+`parse_named_arg(pair: Pair<Rule>) -> Result<(String, Expr)>` :
+
+- 概要: `named_arg`（`ident ~ ":" ~ ternary_expr`）から `(ポート名, 接続式)` のタプルを構築。
 
 `parse_decl(pair: Pair<Rule>) -> Result<Decl>` :
 
@@ -265,18 +365,23 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 
 `parse_expression_factor(pair: Pair<Rule>) -> Result<Expr>` :
 
-- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`・`Expr::BitVecLiteral`、または括弧で囲まれた `Expr`（`ternary_expr` を再帰的に解決）を構築する。
-- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::bitvec_literal` → `parse_bitvec_literal` を呼び出し、`Rule::ternary_expr` → `parse_ternary_expr` を再帰呼び出し（括弧の中身。括弧内にも三項演算子を書けるようにするため `expression` ではなく `ternary_expr` を再帰する）。
+- 概要: `expression_factor` ルールのペアから `Expr::FieldAccess`・`Expr::Ident`・`Expr::Number`・`Expr::BitVecLiteral`、または括弧で囲まれた `Expr`（`ternary_expr` を再帰的に解決）を構築する。
+- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::bitvec_literal` → `parse_bitvec_literal` を呼び出し、`Rule::field_access` → `parse_field_access` を呼び出し、`Rule::ternary_expr` → `parse_ternary_expr` を再帰呼び出し（括弧の中身。括弧内にも三項演算子を書けるようにするため `expression` ではなく `ternary_expr` を再帰する）。
 
 `parse_bitvec_literal(pair: Pair<Rule>) -> Result<Expr>` :
 
 - 概要: `bitvec_literal`（`number ~ "'" ~ radix ~ literal_digits`）を `Expr::BitVecLiteral` に変換する。
 - 処理: 子ペアから幅（`Rule::number`）、基数文字（`Rule::radix`: `b`/`o`/`d`/`h`）、桁の文字列（`Rule::literal_digits`）を取り出し、基数を2/8/10/16に対応させて `u64::from_str_radix` で値へ変換する。基数に合わない桁（例: `2進数`基数に対する`9`）は `from_str_radix` がエラーを返すので、そのまま `ParseError` として伝播する。宣言幅への切り詰めはここでは行わず（`ResolvedExpr`・`Node::Const` まではそのまま値を保持し）、ネットリスト構築時（`NetlistBuilder::build_expr`）にまとめて行う。
 
+`parse_field_access(pair: Pair<Rule>) -> Result<Expr>` :
+
+- 概要: `field_access`（`ident ~ "." ~ ident`）を `Expr::FieldAccess { instance, field }` に変換する。
+- 処理: 子ペアの2つの `Rule::ident` を順にインスタンス名・フィールド名として取り出す（どちらも `is_keyword` でキーワード検査）。この時点ではインスタンスが実在するか・フィールドがそのモジュールの`output`ポートかは検査しない（エラボレーションで検証する）。
+
 `is_keyword(s: &str) -> bool` :
 
-- 概要: 文字列がキーワード（`var` / `bit`）かどうかを判定する。
-- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit` も識別子として受理できてしまう）ため、`parse_decl`・`parse_stmt`・`parse_expression_factor` の3箇所で識別子を確定させるたびにこの関数でキーワードを弾き、変数名としての使用を防いでいる。
+- 概要: 文字列がキーワード（`var` / `bit` / `module` / `port` / `input` / `output`）かどうかを判定する。
+- 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit`なども識別子として受理できてしまう）ため、識別子を確定させる各箇所（`parse_decl`・`parse_stmt`・`parse_expression_factor`・`parse_module_def`・`parse_port_decl`・`parse_inst_decl`・`parse_field_access`）でこの関数を呼んでキーワードを弾き、変数名・モジュール名・ポート名・インスタンス名としての使用を防いでいる。
 
 ### 文法ファイル: `grammar.pest`
 
@@ -285,12 +390,20 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 - 内容:
 
 ```pest
-program = { block+ }
-block   = { "{" ~ (decl | stmt)* ~ "}" }
-decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
-stmt    = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
-assign  = { "=" }
-nonblock= { "<=" }
+program = { SOI ~ (module_def | block)+ ~ EOI }
+
+module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
+port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
+port_decl  = { ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+direction  = { "input" | "output" }
+
+block     = { "{" ~ (decl | inst_decl | stmt)* ~ "}" }
+decl      = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
+inst_decl = { "var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";" }
+named_arg = { ident ~ ":" ~ ternary_expr }
+stmt      = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
+assign    = { "=" }
+nonblock  = { "<=" }
 ternary_expr      = { expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)? }
 expression        = { expression1 ~ (or_op ~ expression1)* }
 expression1       = { expression2 ~ (and_op ~ expression2)* }
@@ -303,7 +416,8 @@ expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
 expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
 expression_unary  = { unary_op* ~ expression_factor }
-expression_factor = { ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
+expression_factor = { field_access | ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
+field_access      = { ident ~ "." ~ ident }
 
 or_op     = { "||" }
 and_op    = { "&&" }
@@ -325,6 +439,7 @@ radix          = { "b" | "o" | "d" | "h" }
 literal_digits = @{ ASCII_ALPHANUMERIC+ }
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 ```
 
 - 演算子は個別ルール（`or_op`/`eq_op`など）でラップしている。pestでは無名の文字列リテラルは子Pairにならないため、`("+" | "-")`のように選択肢が複数ある演算子はラップしないとどちらが一致したか判別できない。
@@ -334,15 +449,22 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - `ternary_expr` は二項演算子チェーン全体（`expression`）よりさらに外側にある。`stmt` の右辺と `expression_factor` の括弧の中身は、どちらも `expression` ではなく `ternary_expr` を参照することで、`a ? b : c` だけでなく `(a ? b : c) + 1` のように括弧内でも三項演算子を使えるようにしている。右結合にするため、then/else 側の再帰先はどちらも `ternary_expr` 自身（1つ下の優先順位ではなく自分自身）にしている。
 - `bitvec_literal` は `${ ... }`（compound-atomic）で定義している。`@{ ... }`（atomic）だと内部の `number`/`radix`/`literal_digits` の子Pairが消えて丸ごと1つのトークンになってしまい、幅・基数・桁を個別に取り出せなくなる。`${ ... }` は空白の暗黙挿入を止めつつ（`4 'b 1010` のような書き方を防ぐ）、子Pairは維持してくれる。
 - `expression_factor` では `bitvec_literal` を `number` より先に置いている。`4'b1010` の `4` の部分だけで `number` にマッチしてしまうと、続く `'b1010` が余ってパース全体が失敗する。PEGの順序付き選択では `bitvec_literal` を先に試し、`'` が続かない入力（例えば単なる `42`）では自動的にバックトラックして `number` にフォールバックする。
+- 同様に `field_access`（`ident ~ "." ~ ident`）も `expression_factor` の中で単独の `ident` より先に置いている。`u1.sum` の `u1` だけで `ident` にマッチしてしまうと `.sum` が余ってパースが壊れるため、`field_access` を先に試し、`.` が続かない入力では `ident` にバックトラックする。
+- `inst_decl`（モジュールインスタンス化）は `block` の中にのみあり、`module_def` の本体（`(decl | stmt)*`）には含まれていない。これにより「モジュールが別のモジュールをインスタンス化する」というネストが文法レベルで禁止されている（現状の制限。将来ネストに対応する場合はここを緩める）。
+- `program` は `SOI ~ ... ~ EOI` で入力全体の消費を明示的に要求している。pestの`Parser::parse()`は、指定したルールが入力の**先頭部分**にさえ一致すれば成功を返し、末尾に残った未消費の入力があってもエラーにしない（`EOI`を明示しない限り）。これを`SOI`/`EOI`無しのまま放置すると、例えば`//`コメントのようにこの文法がサポートしていない構文が入力の途中に現れた場合、そこで静かにパースを打ち切り、それ以降の内容（コメントの後に続くはずのブロック全体など）を**エラーも警告も無く**捨ててしまう（実際にこの不備が原因で、コメント付きのソースの後半ブロックが丸ごと無視されるバグが起きたことがある）。`EOI`まで明示的に要求することで、こうした未消費の残りは即座にパースエラーになる。
+- `COMMENT`（`"//" ~ (!"\n" ~ ANY)*`）は行コメントを定義する silent ルール。`WHITESPACE`と同様、`COMMENT`という名前の非atomicルールは暗黙的に他のルールのトークン間（`~`の間）に挿入されるため、個々のルールで明示的にコメントを許可する記述は不要。
 
 - `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
 - `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
 - `_{ ... }` は silent ルール（AST に現れない）
-- `WHITESPACE` は暗黙的に他のルールのトークン間に挿入される特殊ルール
+- `WHITESPACE`/`COMMENT` は暗黙的に他のルールのトークン間に挿入される特殊ルール
+- `SOI`/`EOI` は入力の先頭/末尾を表す組み込みルール
 
 ---
 
 ## `elaboration` モジュール
+
+モジュール定義とトップレベルは、どちらも「信号・代入文・インスタンスの集合」という共通の形（`ResolvedScope`）で扱う。モジュール定義は**宣言された時点で（インスタンス化の有無によらず）1回だけ**解決・検証され、インスタンス化のたびに使い回される。階層はここではまだ展開されない（展開するのは`netlist`モジュール）。
 
 ### 型
 
@@ -354,11 +476,11 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 `ResolvedSignal` :
 
-- 役割: 解決済みの信号定義。パース時の `Decl` から変数名をシンボルテーブルで ID に変換したもの。
+- 役割: 解決済みの信号定義。パース時の `Decl`（またはポート宣言）から変数名をシンボルテーブルで ID に変換したもの。
 - フィールド:
   - `name: String` — 変数名（元のソースの名前）
   - `width: u64` — ビット幅（`bit` = 1、`bit<N>` = N）
-  - `id: usize` — 信号ID（0始まりの通番）
+  - `id: usize` — 信号ID（そのスコープ内で0始まりの通番。モジュール本体とトップレベルはそれぞれ別のID空間を持つ）
 
 `ResolvedStmt` (enum) :
 
@@ -376,21 +498,59 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Ident(usize)` — 信号ID参照
   - `Number(u64)` — 数値リテラル
   - `BitVecLiteral { width: u64, value: u64 }` — ビットベクタリテラル
+  - `InstanceField { instance_name: String, port_name: String }` — モジュールインスタンスの出力ポート参照（`u1.sum`の解決後）。この時点ではまだ「同じスコープのどのインスタンスのどのポートか」という名前のままで、実際のノードへの変換は`netlist`モジュールが階層を展開するタイミングで行う
   - `BinOp { op: BinOp, lhs: Box<ResolvedExpr>, rhs: Box<ResolvedExpr> }` — 二項演算
   - `UnaryOp { op: UnOp, expr: Box<ResolvedExpr> }` — 前置単項演算
   - `Ternary { cond: Box<ResolvedExpr>, then_branch: Box<ResolvedExpr>, else_branch: Box<ResolvedExpr> }` — 三項演算（条件式）
+
+`ResolvedPort` :
+
+- 役割: 解決済みのポート定義。
+- フィールド:
+  - `name: String` — ポート名
+  - `direction: Direction` — 向き
+  - `signal_id: usize` — モジュール本体内でのローカル信号ID（`body.signals`のインデックスと対応）
+
+`ResolvedInstance` :
+
+- 役割: 解決済みのモジュールインスタンス。
+- フィールド:
+  - `instance_name: String` — インスタンス名
+  - `module_name: String` — インスタンス化したモジュール名
+  - `connections: HashMap<String, ResolvedExpr>` — ポート名 → 接続式（**呼び出し側スコープの信号IDで**解決済み）のマップ
+
+`ResolvedScope` :
+
+- 役割: 信号・代入文・インスタンスの集合。トップレベルにもモジュール本体にも使う共通の形。
+- フィールド:
+  - `signals: Vec<ResolvedSignal>` — このスコープの信号のリスト
+  - `stmts: Vec<ResolvedStmt>` — このスコープの代入文のリスト
+  - `instances: Vec<ResolvedInstance>` — このスコープが直接持つモジュールインスタンスのリスト（モジュール本体は現状ネスト不可のため常に空）
+
+`ResolvedModuleDef` :
+
+- 役割: 解決済みのモジュール定義。
+- フィールド:
+  - `name: String` — モジュール名
+  - `ports: Vec<ResolvedPort>` — ポート定義のリスト
+  - `body: ResolvedScope` — モジュール本体（ポートも通常の信号として`body.signals`に含まれる）
 
 `Elaborated` :
 
 - 役割: エラボレーション結果全体。
 - フィールド:
-  - `signals: Vec<ResolvedSignal>` — 全信号のリスト
-  - `stmts: Vec<ResolvedStmt>` — 全代入文の解決後リスト
+  - `top: ResolvedScope` — トップレベルのスコープ
+  - `modules: HashMap<String, ResolvedModuleDef>` — モジュール名 → 解決済みモジュール定義
 
 `SymbolTable` (type alias) :
 
 - 定義: `HashMap<String, usize>`
-- 役割: 変数名 → 信号ID のマッピング。エラボレーション中に一時的に構築される。
+- 役割: 変数名 → 信号ID のマッピング。1つのスコープの中で一時的に構築される。
+
+`InstanceTable` (type alias) :
+
+- 定義: `HashMap<String, String>`
+- 役割: インスタンス名 → モジュール名 のマッピング。`Expr::FieldAccess`（`u1.sum`）を解決する際、`u1`がどのモジュールのインスタンスかを引くために使う。
 
 `WHITE` / `GRAY` / `BLACK` (定数, `u8`) :
 
@@ -400,36 +560,63 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 `elaborate(prog: &Program) -> Result<Elaborated>` :
 
-- 概要: AST を受け取り、`build_*` で宣言・文を解決したあと `check_*` を順に適用し、解決済みIR を返す。
+- 概要: AST を受け取り、まずモジュール定義をすべて解決・検証し、そのあとトップレベルを解決する。
 - 処理:
-  1. `build_signals` で宣言からシンボルテーブルと信号リストを構築
-  2. `resolve_stmts` で代入文の変数名をシンボルIDに解決
-  3. `check_multiple_drivers` で同一信号への複数ドライバを検出
-  4. `check_combinational_loops` で組合せ代入間の循環依存を検出
-- 備考: チェックを追加する場合は同じ形の `check_*` 関数を書き、`elaborate()` に1行足すだけでよい（配列やtraitによる登録機構は導入していない）。
+  1. `build_module_defs` で全モジュール定義を1回ずつ解決・検証
+  2. `elaborate_top` でトップレベルのブロック群を解決
+  3. `Elaborated { top, modules }` を返す
+
+`build_module_defs(prog: &Program) -> Result<HashMap<String, ResolvedModuleDef>>` :
+
+- 概要: `prog.modules` を走査し、モジュール名の重複チェックをしながら各モジュールを `resolve_module_def` で解決する。
+
+`resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef>` :
+
+- 概要: 1つのモジュール定義を解決・検証する。ポートも内部信号もこの関数のローカルなシンボルテーブルに登録され、この関数の中で完結する（インスタンス化の回数に関わらず1回だけ実行される）。
+- 処理:
+  1. ポート（`m.ports`）を先に信号として登録（重複ポート名はエラー）、`ResolvedPort`（向き・ローカル信号ID）も同時に構築
+  2. 内部の `var` 宣言（`m.decls`）を続けて登録（重複はエラー）
+  3. 本体の代入文（`m.stmts`）を解決。代入先が`input`ポートの場合はエラー（`input`は外部から供給されるため内部で駆動できない）。式の解決には`resolve_expr`を使うが、モジュール本体は現状インスタンスを持てないため、空の`InstanceTable`と空のモジュールテーブルを渡す
+  4. `check_multiple_drivers`・`check_combinational_loops` を適用（`input`ポートは代入先になり得ないため、これらの関数自体に変更は不要）
+  5. `ResolvedModuleDef { name, ports, body: ResolvedScope { signals, stmts, instances: vec![] } }` を返す
+
+`elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<ResolvedScope>` :
+
+- 概要: トップレベルのブロック群を解決する。
+- 処理:
+  1. `build_signals` で信号を解決（既存のロジックのまま）
+  2. `build_instances` でモジュールインスタンス化を解決（モジュールテーブルを参照）
+  3. `resolve_stmts` で代入文を解決（インスタンステーブルも渡し、`FieldAccess`の解決に使う）
+  4. `check_multiple_drivers`・`check_combinational_loops` を適用
 
 `build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>` :
 
 - 概要: 全ブロックの宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。
 - 処理: 重複チェック（同名変数があればエラー）、シンボルテーブル（名前→ID）の構築、`ResolvedSignal` のリスト作成（`width` のデフォルトは1）
 
-`resolve_stmts(prog: &Program, symtab: &SymbolTable) -> Result<Vec<ResolvedStmt>>` :
+`build_instances(prog: &Program, symtab: &SymbolTable, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(Vec<ResolvedInstance>, InstanceTable)>` :
+
+- 概要: 全ブロックのモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。
+- 処理: インスタンス名が信号名・他のインスタンス名と重複していないか検査 → 参照するモジュールが定義されているか検査 → 各引数が実在する`input`ポート名か（`output`ポート名を指定した場合や存在しないポート名は専用のエラーメッセージ）、重複していないかを検査 → 引数式を`resolve_expr`で解決（この時点までに解決済みの同スコープの他インスタンスも参照できるよう、インスタンステーブルを育てながら解決する）→ 全`input`ポート分の接続が揃っているか検査。
+
+`resolve_stmts(prog, symtab, instances, modules) -> Result<Vec<ResolvedStmt>>` :
 
 - 概要: 全ブロックの代入文を走査し、変数名をシンボルIDに解決する。
-- 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`）、代入の種類（Combinational/Sequential）を保持
+- 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`。インスタンステーブルとモジュールテーブルも渡す）、代入の種類（Combinational/Sequential）を保持
 
 `check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :
 
-- 概要: 同一信号への複数ドライバ（多重代入）を検出する。
+- 概要: 同一信号への複数ドライバ（多重代入）を検出する。モジュール本体・トップレベルどちらの`ResolvedScope`にも同じ関数を使う。
 - 処理: `HashSet` に `target_id` を挿入していき、既に挿入済みの ID が再度出てきたらエラー（信号名は `signals[target_id].name` から引く）
 
-`resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr>` :
+`resolve_expr(expr: &Expr, symtab: &SymbolTable, instances: &InstanceTable, modules: &HashMap<String, ResolvedModuleDef>) -> Result<ResolvedExpr>` :
 
-- 概要: AST の式を再帰的に解決済み式に変換する。
+- 概要: AST の式を再帰的に解決済み式に変換する。モジュール本体を解決する際は`instances`に空のマップを渡すため、`FieldAccess`が現れても「インスタンスが見つからない」エラーに自然に倒れる（現状モジュール本体はインスタンスを持てないため、この経路は文法上そもそも通らない）。
 - 処理:
   - `Ident(name)` → シンボルテーブルで ID に解決
   - `Number(n)` → そのまま
   - `BitVecLiteral { width, value }` → そのまま（信号参照を含まないため解決不要）
+  - `FieldAccess { instance, field }` → `instances`でインスタンス名からモジュール名を引き、`modules`でそのモジュールの定義を引く。`field`が実在するポート名か、かつ`output`ポートかを検査（`input`ポートを外部から読もうとするとエラー）した上で`ResolvedExpr::InstanceField`に変換
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
   - `UnaryOp { op, expr }` → オペランドを再帰解決して `ResolvedExpr::UnaryOp`
   - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰解決して `ResolvedExpr::Ternary`
@@ -441,6 +628,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   1. `build_combinational_deps` で依存グラフを構築
   2. 全信号を色 `WHITE` で初期化
   3. 未訪問（`WHITE`）の信号ごとに `dfs_visit` を呼ぶ
+- **既知の制限**: `ResolvedExpr::InstanceField`（`u1.sum`のような読み出し）は`collect_read_signals`で依存なしの葉として扱われる。そのため、あるインスタンスの出力を同じインスタンス（または相互依存する複数インスタンス）の入力に戻すような、**インスタンス境界をまたぐ組合せループはここでは検出できない**。これは、モジュール定義ごとに「どの`input`ポートがどの`output`ポートに組合せ的に影響するか」という依存関係の要約を計算し、インスタンス化のたびに呼び出し側の依存グラフへ合成する必要があるためで、今回のモジュール対応の初期実装ではスコープ外にしている。実際にそのような回路を書いた場合、ネットリスト構築で得られるフラットなDAG自体には循環が残るため、シミュレーション実行時に`Simulator::step`のΔ-サイクル上限（`MAX_COMB_ITERATIONS`）で検出され、パニックになる（コンパイル時ではなく実行時の、より遅いタイミングでの検出になる）。
 
 `build_combinational_deps(stmts: &[ResolvedStmt], signal_count: usize) -> Vec<Vec<usize>>` :
 
@@ -467,6 +655,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Ident(id)` → `[id]`
   - `Number(_)` → 空
   - `BitVecLiteral { .. }` → 空
+  - `InstanceField { .. }` → 空（上記「既知の制限」を参照）
   - `BinOp { lhs, rhs, .. }` → 左右を再帰収集して連結
   - `UnaryOp { expr, .. }` → オペランドを再帰収集
   - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰収集して連結
@@ -570,11 +759,17 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `driver_kind: Option<DriveKind>` — 駆動の種類（未駆動 = None）
   - `kind: SignalKind` — 信号の種別（wire/reg）。`Combinational`駆動または未駆動なら`Wire`、`Sequential`駆動なら`Reg { clock: None, reset: None }`
 
+`InstanceRemaps` (type alias) :
+
+- 定義: `HashMap<String, (String, Vec<usize>)>`
+- 役割: スコープ内のインスタンス名 → `(モジュール名, ローカル信号ID→グローバル信号IDのリマップ)`。`flatten_scope`が自分の直下のインスタンスを展開するたびに1件ずつ育て、同じ呼び出しの中で`build_expr`が`InstanceField`を解決する際に参照する。
+
 `NetlistBuilder` :
 
-- 役割: 内部ビルダー。ノードを生成・追加しながら Netlist を構築する。
+- 役割: 内部ビルダー。モジュール階層を`flatten_scope`で再帰的に辿りながら、フラットな`signals`/`nodes`を構築する。
 - フィールド:
   - `nodes: Vec<Node>` — 構築中のノードリスト
+  - `signals: Vec<NetlistSignal>` — 構築中の信号リスト（展開されたすべてのスコープの信号がここに集まる）
   - `next_id: NodeId` — 次に割り当てるノードID
 
 - メソッド:
@@ -587,22 +782,30 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_unaryop(&mut self, op, operand, width) -> NodeId` — 単項演算ノードを生成
   - `make_ternary(&mut self, cond, then_branch, else_branch, width) -> NodeId` — 三項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
-  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない。`BitVecLiteral`は専用の`Node`を持たず`make_const`にそのまま渡すが、明示された幅に収まらない値はここで幅へ切り詰めてから渡す）
+  - `drive_signal(&mut self, target_global, source, kind)` — `target_global`（グローバル信号ID）を`make_drive`で駆動し、対応する`NetlistSignal`の`driver_node`/`driver_kind`を更新する共通ヘルパー（組み合わせ代入・順序代入・インスタンスの`input`ポート接続の3箇所から呼ばれる）
+  - `flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules) -> Vec<usize>` — スコープ（トップレベルまたはモジュール本体）を再帰的にフラット化する。詳細は下記
+  - `build_expr(&mut self, expr, remap, instance_remaps, modules) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない。`BitVecLiteral`は専用の`Node`を持たず`make_const`にそのまま渡すが、明示された幅に収まらない値はここで幅へ切り詰めてから渡す。`remap`は現在のスコープのローカル信号ID→グローバル信号IDのリマップ、`instance_remaps`は現在のスコープが直接持つインスタンスのリマップで、`Ident`/`InstanceField`の解決にそれぞれ使う）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
 ### 関数
 
+`scoped_name(prefix: &str, name: &str) -> String` :
+
+- 概要: 信号名に名前空間プレフィックスを付ける。`prefix`が空文字列（トップレベル）ならそのまま、そうでなければ`"{prefix}.{name}"`（例: `"u1.sum"`）を返す。
+
 `build_netlist(elab: &Elaborated) -> Netlist` :
 
-- 概要: エラボレーション結果からネットリストを生成する。
+- 概要: エラボレーション結果からネットリストを生成する。実体は`NetlistBuilder::flatten_scope`をトップレベルスコープ（`elab.top`、プレフィックス空文字列）に対して1回呼ぶだけ。
+- 備考: モジュール階層はここで再帰的にフラット化される。展開後の`Node`/`NetlistSignal`はモジュールの存在を一切知らないため、`Simulator`はモジュール対応前と全く同じまま変更不要。
+
+`NetlistBuilder::flatten_scope(&mut self, scope: &ResolvedScope, prefix: &str, modules: &HashMap<String, ResolvedModuleDef>) -> Vec<usize>` :
+
+- 概要: スコープ（トップレベルまたはモジュール本体）をフラットな信号・ノードへ再帰的に展開する。戻り値はこのスコープのローカル信号ID→グローバル信号IDのリマップで、呼び出し元（インスタンス化した側）が入出力ポートの接続に使う。
 - 処理:
-  1. `Elaborated.signals` から `NetlistSignal` のリストを作成（driver情報は初期化時点では None、`kind` は初期値 `SignalKind::Wire`）
-  2. 各 `ResolvedStmt` について:
-     - `build_expr()` で右辺の式ノードを構築
-     - `make_drive()` で駆動ノードを生成
-     - 対応する信号の `driver_node`/`driver_kind` を更新
-     - `Sequential` の場合のみ `kind` を `SignalKind::Reg { clock: None, reset: None }` に更新（`Combinational`は初期値の`Wire`のまま）
-  3. `Netlist { signals, nodes }` を返す
+  1. `scope.signals`の各信号を`scoped_name(prefix, ...)`で名前空間付きの`NetlistSignal`として`self.signals`に追加し、ローカルID→グローバルIDの`remap`を作る
+  2. `scope.instances`の各インスタンスについて、そのモジュール本体を`prefix`にインスタンス名を足した名前空間（`scoped_name(prefix, instance_name)`）で再帰的に`flatten_scope`し、`instance_remaps`に`(モジュール名, リマップ)`を記録。続けて、そのモジュールの`input`ポートそれぞれについて、接続式（外側スコープの`remap`で解決）を`build_expr`し、`drive_signal`でインスタンス内部の当該ポート信号を組み合わせDriveとして駆動する（インスタンス化 = 入力ポートへの合成の代入、という扱い）
+  3. `scope.stmts`の各文について、`build_expr`（`remap`と、ここまでに構築した`instance_remaps`を渡す）→`drive_signal`で駆動。`Sequential`の場合はさらに`kind`を`SignalKind::Reg { clock: None, reset: None }`に更新
+  4. `remap`を返す
 
 `format_netlist(nl: &Netlist) -> String` :
 
@@ -806,5 +1009,6 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 | ビットベクタリテラルの桁区切り（`8'b0000_0001`） | `grammar.pest` (literal_digitsに`_`許容), `parser.rs` (パース時に`_`除去)                                    |
 | `wire`/`reg`宣言構文（クロック/リセット指定） | `grammar.pest`, `ast.rs` (Decl 拡張), `parser.rs`, `netlist.rs` (build_netlistで`SignalKind::Reg`の`clock`/`reset`を実際に埋める), `simulator.rs` (エッジ検出評価。`clock: None`の信号は現行のstep単位更新のまま据え置き) |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
-| モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |
+| モジュールのネスト（モジュールが別のモジュールをインスタンス化） | `grammar.pest` (`inst_decl`を`module_def`本体にも許可), `elaboration.rs` (`resolve_module_def`にインスタンス解決を追加、モジュール定義同士の循環インスタンス化を検出する依存グラフチェックを追加) |
+| インスタンス境界をまたぐ組合せループの検出（エラボレーション時点） | `elaboration.rs` (モジュール定義ごとに`input`→`output`の組合せ依存を要約し、`InstanceField`の`collect_read_signals`をその要約で置き換える) |
 | VCD ダンプ                            | `simulator.rs` (format_waveform の代わりに VCD 出力)                                                                       |

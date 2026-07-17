@@ -203,6 +203,30 @@ fn ternary_operator_selects_else_branch_when_cond_is_zero() {
 }
 
 #[test]
+fn module_instance_output_reflects_computed_value() {
+    let (mut sim, nodes, signals) = setup(
+        "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum = a + b; } \
+         { var x: bit<8>; var y: bit<8>; var z: bit<8>; x = 3; y = 4; var u1 = adder(a: x, b: y); z = u1.sum; }",
+    );
+    let z_id = signals.iter().position(|s| s.name == "z").unwrap();
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[z_id], 7, "u1.sum = x + y = 3 + 4 = 7 がzに伝搬する");
+}
+
+#[test]
+fn module_instance_with_sequential_output_has_one_cycle_latency() {
+    let (mut sim, nodes, signals) = setup(
+        "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; } \
+         { var x: bit<8>; var y: bit<8>; x = 3; y = 4; var u1 = adder(a: x, b: y); }",
+    );
+    let sum_id = signals.iter().position(|s| s.name == "u1.sum").unwrap();
+    let snap0 = sim.step(&nodes);
+    assert_eq!(snap0.values[sum_id], 0, "初回サイクルではsumは未反映(0)のまま");
+    let snap1 = sim.step(&nodes);
+    assert_eq!(snap1.values[sum_id], 7, "1サイクル遅れでsum=7が反映される");
+}
+
+#[test]
 fn nested_ternary_operator_evaluates_right_associatively() {
     let (mut sim, nodes, _) =
         setup("{ var a: bit; var c: bit; var x: bit<4>; a = 0; c = 1; x = a ? 1 : c ? 2 : 3; }");

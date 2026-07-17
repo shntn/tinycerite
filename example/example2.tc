@@ -1,0 +1,20 @@
+module adder {
+    port {
+        a: input bit<8>;
+        b: input bit<8>;
+        sum: output bit<8>;
+    }
+
+    sum <= a + b;
+}
+
+{
+    var x: bit<8>;
+    var y: bit<8>;
+    var z: bit<8>;
+
+    x = 128;
+    y = 63;
+    var u1 = adder(a: x, b: y);     // 入力ポートだけを名前付き引数で接続
+    z = u1.sum;                     // 出力ポートはインスタンスから読み出す
+}

@@ -95,3 +95,57 @@ fn undriven_signal_defaults_to_wire_kind() {
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].kind, SignalKind::Wire);
 }
+
+fn adder_src() -> &'static str {
+    "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum = a + b; }"
+}
+
+#[test]
+fn module_instance_signals_are_flattened_with_instance_name_prefix() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        adder_src()
+    );
+    let nl = netlist_of(&src);
+    let names: Vec<&str> = nl.signals.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"x"));
+    assert!(names.contains(&"y"));
+    assert!(names.contains(&"u1.a"));
+    assert!(names.contains(&"u1.b"));
+    assert!(names.contains(&"u1.sum"));
+}
+
+#[test]
+fn module_instance_signals_preserve_declared_width() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        adder_src()
+    );
+    let nl = netlist_of(&src);
+    let sum = nl.signals.iter().find(|s| s.name == "u1.sum").unwrap();
+    assert_eq!(sum.width, 8);
+}
+
+#[test]
+fn module_instance_input_port_is_driven_by_connection_expr() {
+    let src = format!(
+        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        adder_src()
+    );
+    let nl = netlist_of(&src);
+    let a = nl.signals.iter().find(|s| s.name == "u1.a").unwrap();
+    assert_eq!(a.driver_kind, Some(DriveKind::Combinational), "u1.aはx接続の合成Driveで駆動される");
+}
+
+#[test]
+fn two_instances_of_the_same_module_get_distinct_namespaces() {
+    let src = format!(
+        "{adder} {{ var x: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: x, b: x); }}",
+        adder = adder_src()
+    );
+    let nl = netlist_of(&src);
+    let names: Vec<&str> = nl.signals.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"u1.sum"));
+    assert!(names.contains(&"u2.sum"));
+    assert_eq!(nl.signals.iter().filter(|s| s.name.ends_with(".sum")).count(), 2);
+}
