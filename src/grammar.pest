@@ -16,7 +16,7 @@ expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
 expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
 expression_unary  = { unary_op* ~ expression_factor }
-expression_factor = { ident | number | "(" ~ ternary_expr ~ ")" }
+expression_factor = { ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
 
 or_op     = { "||" }
 and_op    = { "&&" }
@@ -32,5 +32,10 @@ unary_op  = { "!" | "~" }
 
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }
+
+// ビットベクタリテラル（例: `4'b1010`, `8'hFF`, `8'd200`, `4'o17`）
+bitvec_literal = ${ number ~ "'" ~ radix ~ literal_digits }
+radix          = { "b" | "o" | "d" | "h" }
+literal_digits = @{ ASCII_ALPHANUMERIC+ }
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

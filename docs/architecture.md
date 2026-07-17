@@ -42,16 +42,18 @@ expression7       = expression8 (("<<<" | "<<" | ">>>" | ">>") expression8)*
 expression8       = expression9 (("+" | "-") expression9)*
 expression9       = expression_unary (("*" | "/" | "%") expression_unary)*
 expression_unary  = ("!" | "~")* expression_factor
-expression_factor = ident | number | "(" ternary_expr ")"
+expression_factor = ident | bitvec_literal | number | "(" ternary_expr ")"
 
-ident       = [a-zA-Z_][a-zA-Z0-9_]*
-number      = [0-9]+
+ident          = [a-zA-Z_][a-zA-Z0-9_]*
+number         = [0-9]+
+bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 ```
 
 ## セマンティクス
 
 - `var x: bit` — 1ビットの信号 x を宣言（初期値 0）
 - `var x: bit<N>` — Nビットの信号 x を宣言
+- `N'b...` `N'o...` `N'd...` `N'h...` — ビットベクタリテラル。幅 `N` と基数（`b`=2進、`o`=8進、`d`=10進、`h`=16進、大小文字どちらの16進桁も可）を明示する（例: `4'b1010`、`8'hFF`）。桁が宣言した幅に収まらない場合（例: `4'b11111`）はエラーにせず、代入と同様に幅へ切り詰める。基数に合わない桁（例: `2'b19`）はパースエラー
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
 - `cond ? then_branch : else_branch` — 三項演算子（条件式）。すべての演算子の中で最も優先度が低く、右結合（`a ? b : c ? d : e` は `a ? b : (c ? d : e)`）。`cond` が0以外なら `then_branch`、0なら `else_branch` を選択する。ハードウェア的にはマルチプレクサなので、選ばれなかった分岐も含めて両方が常に評価される（0除算などの副作用があっても選択に関わらず発生する）。結果幅は `then_branch`/`else_branch` の大きい方（`cond` は選択にのみ使われ幅には影響しない）
@@ -146,7 +148,10 @@ number      = [0-9]+
 - 役割: 式。右辺の計算を表す木構造。
 - バリアント:
   - `Ident(String)` — 変数参照（例: `a`）
-  - `Number(u64)` — 10進数リテラル（例: `1`、`42`）
+  - `Number(u64)` — 10進数リテラル（例: `1`、`42`）。幅は代入先や周囲の式から推測される
+  - `BitVecLiteral { width: u64, value: u64 }` — ビットベクタリテラル（例: `4'b1010`、`8'hFF`）。`Number`と異なり幅を明示する
+    - `width` — 明示された幅
+    - `value` — パース済みの値（基数変換後。宣言幅に収まらない場合、幅への切り詰めはネットリスト構築時に行う）
   - `BinOp { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> }` — 二項演算
     - `op` — 演算子の種類
     - `lhs` — 左辺の式
@@ -260,8 +265,13 @@ number      = [0-9]+
 
 `parse_expression_factor(pair: Pair<Rule>) -> Result<Expr>` :
 
-- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`、または括弧で囲まれた `Expr`（`ternary_expr` を再帰的に解決）を構築する。
-- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::ternary_expr` → `parse_ternary_expr` を再帰呼び出し（括弧の中身。括弧内にも三項演算子を書けるようにするため `expression` ではなく `ternary_expr` を再帰する）。
+- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`・`Expr::BitVecLiteral`、または括弧で囲まれた `Expr`（`ternary_expr` を再帰的に解決）を構築する。
+- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::bitvec_literal` → `parse_bitvec_literal` を呼び出し、`Rule::ternary_expr` → `parse_ternary_expr` を再帰呼び出し（括弧の中身。括弧内にも三項演算子を書けるようにするため `expression` ではなく `ternary_expr` を再帰する）。
+
+`parse_bitvec_literal(pair: Pair<Rule>) -> Result<Expr>` :
+
+- 概要: `bitvec_literal`（`number ~ "'" ~ radix ~ literal_digits`）を `Expr::BitVecLiteral` に変換する。
+- 処理: 子ペアから幅（`Rule::number`）、基数文字（`Rule::radix`: `b`/`o`/`d`/`h`）、桁の文字列（`Rule::literal_digits`）を取り出し、基数を2/8/10/16に対応させて `u64::from_str_radix` で値へ変換する。基数に合わない桁（例: `2進数`基数に対する`9`）は `from_str_radix` がエラーを返すので、そのまま `ParseError` として伝播する。宣言幅への切り詰めはここでは行わず（`ResolvedExpr`・`Node::Const` まではそのまま値を保持し）、ネットリスト構築時（`NetlistBuilder::build_expr`）にまとめて行う。
 
 `is_keyword(s: &str) -> bool` :
 
@@ -293,7 +303,7 @@ expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
 expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
 expression_unary  = { unary_op* ~ expression_factor }
-expression_factor = { ident | number | "(" ~ ternary_expr ~ ")" }
+expression_factor = { ident | bitvec_literal | number | "(" ~ ternary_expr ~ ")" }
 
 or_op     = { "||" }
 and_op    = { "&&" }
@@ -310,6 +320,10 @@ unary_op  = { "!" | "~" }
 ident   = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 number  = @{ ASCII_DIGIT+ }
 
+bitvec_literal = ${ number ~ "'" ~ radix ~ literal_digits }
+radix          = { "b" | "o" | "d" | "h" }
+literal_digits = @{ ASCII_ALPHANUMERIC+ }
+
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 ```
 
@@ -318,6 +332,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - `rel_op`/`shift_op` は選択肢の順序が重要。PEGの選択はバックトラックせず最初に一致したものを採用するため、`"<"` を `"<="` より先に書くと `<=` の `=` が読めずに壊れる。長い演算子を先に置く必要がある（例: `"<="` の後に `"<"`）。
 - `unary_op`（前置の `!`）と `eq_op` の `!=` は文字が重なるが衝突しない。`unary_op` は「オペランドの開始位置」（`expression_unary` の先頭）でのみ試され、`!=` は「演算子の開始位置」（`eq_op` の位置、両オペランドの間）でのみ試されるため、同じ入力位置で競合することがない。
 - `ternary_expr` は二項演算子チェーン全体（`expression`）よりさらに外側にある。`stmt` の右辺と `expression_factor` の括弧の中身は、どちらも `expression` ではなく `ternary_expr` を参照することで、`a ? b : c` だけでなく `(a ? b : c) + 1` のように括弧内でも三項演算子を使えるようにしている。右結合にするため、then/else 側の再帰先はどちらも `ternary_expr` 自身（1つ下の優先順位ではなく自分自身）にしている。
+- `bitvec_literal` は `${ ... }`（compound-atomic）で定義している。`@{ ... }`（atomic）だと内部の `number`/`radix`/`literal_digits` の子Pairが消えて丸ごと1つのトークンになってしまい、幅・基数・桁を個別に取り出せなくなる。`${ ... }` は空白の暗黙挿入を止めつつ（`4 'b 1010` のような書き方を防ぐ）、子Pairは維持してくれる。
+- `expression_factor` では `bitvec_literal` を `number` より先に置いている。`4'b1010` の `4` の部分だけで `number` にマッチしてしまうと、続く `'b1010` が余ってパース全体が失敗する。PEGの順序付き選択では `bitvec_literal` を先に試し、`'` が続かない入力（例えば単なる `42`）では自動的にバックトラックして `number` にフォールバックする。
 
 - `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
 - `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
@@ -359,6 +375,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - バリアント:
   - `Ident(usize)` — 信号ID参照
   - `Number(u64)` — 数値リテラル
+  - `BitVecLiteral { width: u64, value: u64 }` — ビットベクタリテラル
   - `BinOp { op: BinOp, lhs: Box<ResolvedExpr>, rhs: Box<ResolvedExpr> }` — 二項演算
   - `UnaryOp { op: UnOp, expr: Box<ResolvedExpr> }` — 前置単項演算
   - `Ternary { cond: Box<ResolvedExpr>, then_branch: Box<ResolvedExpr>, else_branch: Box<ResolvedExpr> }` — 三項演算（条件式）
@@ -412,6 +429,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 処理:
   - `Ident(name)` → シンボルテーブルで ID に解決
   - `Number(n)` → そのまま
+  - `BitVecLiteral { width, value }` → そのまま（信号参照を含まないため解決不要）
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
   - `UnaryOp { op, expr }` → オペランドを再帰解決して `ResolvedExpr::UnaryOp`
   - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰解決して `ResolvedExpr::Ternary`
@@ -448,6 +466,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 処理:
   - `Ident(id)` → `[id]`
   - `Number(_)` → 空
+  - `BitVecLiteral { .. }` → 空
   - `BinOp { lhs, rhs, .. }` → 左右を再帰収集して連結
   - `UnaryOp { expr, .. }` → オペランドを再帰収集
   - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰収集して連結
@@ -539,7 +558,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_unaryop(&mut self, op, operand, width) -> NodeId` — 単項演算ノードを生成
   - `make_ternary(&mut self, cond, then_branch, else_branch, width) -> NodeId` — 三項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
-  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない）
+  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない。`BitVecLiteral`は専用の`Node`を持たず`make_const`にそのまま渡すが、明示された幅に収まらない値はここで幅へ切り詰めてから渡す）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
 ### 関数
@@ -754,7 +773,7 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 | 追加したい機能                        | 変更するファイル                                                                                                           |
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | 単項マイナス（`-a`）                  | `ast.rs` (UnOp::Neg 追加), `grammar.pest` (unary_opに`-`追加), `parser.rs`, `netlist.rs`, `simulator.rs`                   |
-| ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs`                                                       |
+| ビットベクタリテラルの桁区切り（`8'b0000_0001`） | `grammar.pest` (literal_digitsに`_`許容), `parser.rs` (パース時に`_`除去)                                    |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |
 | VCD ダンプ                            | `simulator.rs` (format_waveform の代わりに VCD 出力)                                                                       |

@@ -54,8 +54,13 @@ impl Stmt {
 pub enum Expr {
     /// 変数参照
     Ident(String),
-    /// 数値リテラル（10進数）
+    /// 数値リテラル（10進数、幅は代入先や周囲の式から推測される）
     Number(u64),
+    /// ビットベクタリテラル（例: `4'b1010`、`8'hFF`）。幅を明示する
+    BitVecLiteral {
+        width: u64,
+        value: u64,
+    },
     /// 二項演算
     BinOp {
         op: BinOp,

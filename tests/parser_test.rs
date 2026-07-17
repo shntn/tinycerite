@@ -228,6 +228,64 @@ fn unary_operator_binds_tighter_than_multiplication() {
 }
 
 #[test]
+fn binary_bitvec_literal_parses_correctly() {
+    let prog = parse("{ var x: bit<4>; x = 4'b1010; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BitVecLiteral { width: 4, value: 10 }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn hex_bitvec_literal_parses_correctly() {
+    let prog = parse("{ var x: bit<8>; x = 8'hFF; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 255 }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn octal_and_decimal_bitvec_literals_parse_correctly() {
+    let prog = parse("{ var x: bit<8>; var y: bit<8>; x = 8'o17; y = 8'd200; }");
+    match &prog.blocks[0].stmts[0] {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 15 }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+    match &prog.blocks[0].stmts[1] {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 200 }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn lowercase_hex_digits_in_bitvec_literal_parse_correctly() {
+    let prog = parse("{ var x: bit<8>; x = 8'hff; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 255 }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn digit_invalid_for_radix_in_bitvec_literal_is_error() {
+    assert!(Parser::parse_program("{ var x: bit<4>; x = 2'b19; }").is_err());
+}
+
+#[test]
 fn ternary_operator_parses_as_ternary_expr() {
     let prog = parse("{ var x: bit; var a: bit; x = a ? 1 : 0; }");
     let stmt = &prog.blocks[0].stmts[0];

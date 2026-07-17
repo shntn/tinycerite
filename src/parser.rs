@@ -314,9 +314,60 @@ fn parse_expression_factor(pair: Pair<Rule>) -> Result<Expr> {
                 })?;
             Ok(Expr::Number(n))
         }
+        Rule::bitvec_literal => parse_bitvec_literal(inner),
         Rule::ternary_expr => parse_ternary_expr(inner),
         _ => Err(ParseError {
             message: format!("式の項として予期しないルール: {:?}", inner.as_rule()),
         }),
     }
+}
+
+/// `bitvec_literal`（`number ~ "'" ~ radix ~ literal_digits`）をパースする
+///
+/// 幅（`number`）と基数（`radix`: `b`=2進, `o`=8進, `d`=10進, `h`=16進）、桁の文字列
+/// （`literal_digits`）を取り出し、基数に応じて数値へ変換する。基数に合わない桁
+/// （例: `2'b19`のような`b`基数に対する`9`）はエラーになる。
+fn parse_bitvec_literal(pair: Pair<Rule>) -> Result<Expr> {
+    let mut width = None;
+    let mut radix_char = None;
+    let mut digits = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::number => {
+                width = Some(inner.as_str().parse::<u64>().map_err(|e| ParseError {
+                    message: format!("ビットベクタリテラルの幅パース失敗: {} ({})", inner.as_str(), e),
+                })?);
+            }
+            Rule::radix => radix_char = Some(inner.as_str().to_string()),
+            Rule::literal_digits => digits = Some(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+
+    let width = width.ok_or_else(|| ParseError {
+        message: "ビットベクタリテラルの幅が見つかりません".to_string(),
+    })?;
+    let radix_char = radix_char.ok_or_else(|| ParseError {
+        message: "ビットベクタリテラルの基数が見つかりません".to_string(),
+    })?;
+    let digits = digits.ok_or_else(|| ParseError {
+        message: "ビットベクタリテラルの桁が見つかりません".to_string(),
+    })?;
+
+    let base = match radix_char.as_str() {
+        "b" => 2,
+        "o" => 8,
+        "d" => 10,
+        "h" => 16,
+        _ => unreachable!("radix は b, o, d, h のみ"),
+    };
+    let value = u64::from_str_radix(&digits, base).map_err(|e| ParseError {
+        message: format!(
+            "ビットベクタリテラルの桁パース失敗: {}'{}{} ({})",
+            width, radix_char, digits, e
+        ),
+    })?;
+
+    Ok(Expr::BitVecLiteral { width, value })
 }

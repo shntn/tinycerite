@@ -175,6 +175,20 @@ fn chained_unary_operators_evaluate_correctly() {
 }
 
 #[test]
+fn bitvec_literal_evaluates_to_declared_value() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<8>; x = 8'hFF; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 255, "8'hFF = 255");
+}
+
+#[test]
+fn bitvec_literal_overflowing_its_own_width_is_silently_masked() {
+    let (mut sim, nodes, _) = setup("{ var x: bit<8>; x = 4'b11111; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[0], 15, "4'b11111は4ビットに切り詰められて0b1111=15");
+}
+
+#[test]
 fn ternary_operator_selects_then_branch_when_cond_is_nonzero() {
     let (mut sim, nodes, _) = setup("{ var a: bit; var x: bit<4>; a = 1; x = a ? 5 : 9; }");
     let snap = sim.step(&nodes);

@@ -188,6 +188,11 @@ impl NetlistBuilder {
                 let width = width.max(1);
                 self.make_const(*n, width)
             }
+            ResolvedExpr::BitVecLiteral { width, value } => {
+                // 明示された幅に収まらない値は静的な代入と同様に切り詰める（エラーにはしない）
+                let masked = if *width >= 64 { *value } else { *value & ((1u64 << width) - 1) };
+                self.make_const(masked, *width)
+            }
             ResolvedExpr::Ident(signal_id) => {
                 let sig = &signals[*signal_id];
                 self.make_read_signal(*signal_id, &sig.name, sig.width)

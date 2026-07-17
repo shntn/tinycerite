@@ -44,6 +44,10 @@ pub enum ResolvedStmt {
 pub enum ResolvedExpr {
     Ident(usize), // signal_id
     Number(u64),
+    BitVecLiteral {
+        width: u64,
+        value: u64,
+    },
     BinOp {
         op: BinOp,
         lhs: Box<ResolvedExpr>,
@@ -228,6 +232,7 @@ fn collect_read_signals(expr: &ResolvedExpr) -> Vec<usize> {
     match expr {
         ResolvedExpr::Ident(id) => vec![*id],
         ResolvedExpr::Number(_) => vec![],
+        ResolvedExpr::BitVecLiteral { .. } => vec![],
         ResolvedExpr::BinOp { lhs, rhs, .. } => {
             let mut v = collect_read_signals(lhs);
             v.extend(collect_read_signals(rhs));
@@ -252,6 +257,10 @@ fn resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr> {
             Ok(ResolvedExpr::Ident(*id))
         }
         Expr::Number(n) => Ok(ResolvedExpr::Number(*n)),
+        Expr::BitVecLiteral { width, value } => Ok(ResolvedExpr::BitVecLiteral {
+            width: *width,
+            value: *value,
+        }),
         Expr::BinOp { op, lhs, rhs } => {
             let lhs = resolve_expr(lhs, symtab)?;
             let rhs = resolve_expr(rhs, symtab)?;
