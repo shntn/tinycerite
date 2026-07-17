@@ -122,7 +122,7 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
             }
             Rule::assign => is_seq = false,
             Rule::nonblock => is_seq = true,
-            Rule::expression => expr = Some(parse_expression(inner)?),
+            Rule::ternary_expr => expr = Some(parse_ternary_expr(inner)?),
             _ => {} // ";" は無視
         }
     }
@@ -135,6 +135,33 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
         Ok(Stmt::Sequential { target, expr })
     } else {
         Ok(Stmt::Combinational { target, expr })
+    }
+}
+
+/// `ternary_expr`（`expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)?`）を解決する
+///
+/// 条件部の後に `? ... : ...` が続かなければ、そのまま条件部の式を返す（三項演算子は
+/// 常に使われるわけではないため）。続く場合は右結合で `Expr::Ternary` を組み立てる
+/// （then/elseを再帰的に `parse_ternary_expr` で解決することで `a ? b : c ? d : e` が
+/// `a ? b : (c ? d : e)` になる）。
+fn parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let mut pairs = pair.into_inner();
+    let cond_pair = pairs.next().ok_or_else(|| ParseError {
+        message: "三項演算子の条件式が見つかりません".to_string(),
+    })?;
+    let cond = parse_expression(cond_pair)?;
+
+    match (pairs.next(), pairs.next()) {
+        (Some(then_pair), Some(else_pair)) => {
+            let then_branch = parse_ternary_expr(then_pair)?;
+            let else_branch = parse_ternary_expr(else_pair)?;
+            Ok(Expr::Ternary {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            })
+        }
+        _ => Ok(cond),
     }
 }
 
@@ -287,7 +314,7 @@ fn parse_expression_factor(pair: Pair<Rule>) -> Result<Expr> {
                 })?;
             Ok(Expr::Number(n))
         }
-        Rule::expression => parse_expression(inner),
+        Rule::ternary_expr => parse_ternary_expr(inner),
         _ => Err(ParseError {
             message: format!("式の項として予期しないルール: {:?}", inner.as_rule()),
         }),

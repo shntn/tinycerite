@@ -173,3 +173,25 @@ fn chained_unary_operators_evaluate_correctly() {
     let snap = sim.step(&nodes);
     assert_eq!(snap.values[0], 1, "!!1 = !0 = 1");
 }
+
+#[test]
+fn ternary_operator_selects_then_branch_when_cond_is_nonzero() {
+    let (mut sim, nodes, _) = setup("{ var a: bit; var x: bit<4>; a = 1; x = a ? 5 : 9; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[1], 5, "condが真なのでthen(5)が選ばれる");
+}
+
+#[test]
+fn ternary_operator_selects_else_branch_when_cond_is_zero() {
+    let (mut sim, nodes, _) = setup("{ var a: bit; var x: bit<4>; a = 0; x = a ? 5 : 9; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[1], 9, "condが偽なのでelse(9)が選ばれる");
+}
+
+#[test]
+fn nested_ternary_operator_evaluates_right_associatively() {
+    let (mut sim, nodes, _) =
+        setup("{ var a: bit; var c: bit; var x: bit<4>; a = 0; c = 1; x = a ? 1 : c ? 2 : 3; }");
+    let snap = sim.step(&nodes);
+    assert_eq!(snap.values[2], 2, "a=0なのでelse側、c=1なのでthen(2)が選ばれる");
+}

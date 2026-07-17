@@ -43,9 +43,10 @@ cycle  a  b
 program     = block+
 block       = "{" (decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
-stmt        = ident ("=" | "<=") expr ";"
+stmt        = ident ("=" | "<=") ternary_expr ";"
+ternary_expr= expr ("?" ternary_expr ":" ternary_expr)?  # 三項演算子、右結合、優先度は最低
 expr        = 優先順位チェーン（|| > && > | > ^ > & > ==/!= > 比較 > シフト > +/- > */÷/% > 単項）
-primary     = ident | number | "(" expr ")"
+primary     = ident | number | "(" ternary_expr ")"
 ```
 
 演算子の優先順位や各段の詳細は `docs/architecture.md` を参照。
@@ -56,6 +57,7 @@ primary     = ident | number | "(" expr ")"
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、終了時に一斉反映）
 - 演算子: `||` `&&` `|` `^` `&` `==` `!=` `<` `<=` `>` `>=` `<<` `>>` `<<<` `>>>` `+` `-` `*` `/` `%`（括弧`()`でグループ化可能）
 - 前置単項演算子: `!`（論理否定、結果は1ビット） `~`（ビット反転、結果はオペランドと同じ幅）。連続して書ける（例: `!!a`）
+- 三項演算子: `cond ? then_branch : else_branch`（すべての演算子の中で最も優先度が低く、右結合）。`cond`が0以外なら`then_branch`、0なら`else_branch`を選択する。ハードウェア的にはマルチプレクサなので両分岐とも常に評価される
 - 代入結果は代入先信号のビット幅にマスクされる（例: `bit<4>`に17を代入すると`17 & 0b1111 = 1`）。式の途中経過（中間の演算結果）は幅で切り詰められず、u64のラップアラウンドになる
 
 ### 制限（現在）

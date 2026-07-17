@@ -25,7 +25,10 @@ Netlist (信号DAG)
 program     = block+
 block       = "{" (decl | stmt)* "}"
 decl        = "var" ident ":" "bit" ("<" number ">")? ";"
-stmt        = ident ("=" | "<=") expression ";"
+stmt        = ident ("=" | "<=") ternary_expr ";"
+
+# 三項演算子（右結合、演算子の中で最も優先度が低い）
+ternary_expr      = expression ("?" ternary_expr ":" ternary_expr)?
 
 # 演算子優先順位チェーン（上ほど優先度が低い）
 expression        = expression1 ("||" expression1)*
@@ -39,7 +42,7 @@ expression7       = expression8 (("<<<" | "<<" | ">>>" | ">>") expression8)*
 expression8       = expression9 (("+" | "-") expression9)*
 expression9       = expression_unary (("*" | "/" | "%") expression_unary)*
 expression_unary  = ("!" | "~")* expression_factor
-expression_factor = ident | number | "(" expression ")"
+expression_factor = ident | number | "(" ternary_expr ")"
 
 ident       = [a-zA-Z_][a-zA-Z0-9_]*
 number      = [0-9]+
@@ -51,6 +54,7 @@ number      = [0-9]+
 - `var x: bit<N>` — Nビットの信号 x を宣言
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
+- `cond ? then_branch : else_branch` — 三項演算子（条件式）。すべての演算子の中で最も優先度が低く、右結合（`a ? b : c ? d : e` は `a ? b : (c ? d : e)`）。`cond` が0以外なら `then_branch`、0なら `else_branch` を選択する。ハードウェア的にはマルチプレクサなので、選ばれなかった分岐も含めて両方が常に評価される（0除算などの副作用があっても選択に関わらず発生する）。結果幅は `then_branch`/`else_branch` の大きい方（`cond` は選択にのみ使われ幅には影響しない）
 - 演算子（優先度が高い順）:
   1. `!` `~` — 前置単項演算子。論理否定（`!`、結果は1ビットの真偽値）とビット反転（`~`、結果はオペランドと同じ幅）。連続して書ける（例: `!!a`、右結合で内側から適用）
   2. `*` `/` `%` — 乗算・除算・剰余（0除算は0を返す）
@@ -150,6 +154,10 @@ number      = [0-9]+
   - `UnaryOp { op: UnOp, expr: Box<Expr> }` — 前置単項演算
     - `op` — 演算子の種類
     - `expr` — オペランドの式
+  - `Ternary { cond: Box<Expr>, then_branch: Box<Expr>, else_branch: Box<Expr> }` — 三項演算（条件式）
+    - `cond` — 条件式
+    - `then_branch` — 条件が真の場合の式
+    - `else_branch` — 条件が偽の場合の式
 
 `BinOp` (enum) :
 
@@ -212,7 +220,12 @@ number      = [0-9]+
 `parse_stmt(pair: Pair<Rule>) -> Result<Stmt>` :
 
 - 概要: `stmt` ルールのペアから `Stmt` を構築。
-- 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::expression` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
+- 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::ternary_expr` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
+
+`parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr>` :
+
+- 概要: `ternary_expr`（`expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)?`）を解決する。文法上、式の最上位（`stmt` の右辺・括弧の中身）はすべてこの関数から入る。
+- 処理: 条件部（`Rule::expression`）を `parse_expression` で解決。`?`/`:` に続く then/else が無ければ条件部の式をそのまま返す（三項演算子は常に使われるわけではない）。ある場合は then/else をそれぞれ再帰的に `parse_ternary_expr` で解決して `Expr::Ternary` を組み立てる。then/elseの解決を再帰にすることで、`a ? b : c ? d : e` が `a ? b : (c ? d : e)`（右結合）になる。
 
 `parse_left_assoc(pair, parse_operand, op_from_str) -> Result<Expr>` :
 
@@ -247,8 +260,8 @@ number      = [0-9]+
 
 `parse_expression_factor(pair: Pair<Rule>) -> Result<Expr>` :
 
-- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`、または括弧で囲まれた `Expr`（`expression` を再帰的に解決）を構築する。
-- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::expression` → `parse_expression` を再帰呼び出し（括弧の中身）。
+- 概要: `expression_factor` ルールのペアから `Expr::Ident`・`Expr::Number`、または括弧で囲まれた `Expr`（`ternary_expr` を再帰的に解決）を構築する。
+- 処理: 子ペアのルール種別を見て、`Rule::ident` → `Ident(name)`（`is_keyword` でキーワード検査）、`Rule::number` → `Number(value)`、`Rule::ternary_expr` → `parse_ternary_expr` を再帰呼び出し（括弧の中身。括弧内にも三項演算子を書けるようにするため `expression` ではなく `ternary_expr` を再帰する）。
 
 `is_keyword(s: &str) -> bool` :
 
@@ -265,9 +278,10 @@ number      = [0-9]+
 program = { block+ }
 block   = { "{" ~ (decl | stmt)* ~ "}" }
 decl    = { "var" ~ ident ~ ":" ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";" }
-stmt    = { ident ~ (assign | nonblock) ~ expression ~ ";" }
+stmt    = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
 assign  = { "=" }
 nonblock= { "<=" }
+ternary_expr      = { expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)? }
 expression        = { expression1 ~ (or_op ~ expression1)* }
 expression1       = { expression2 ~ (and_op ~ expression2)* }
 expression2       = { expression3 ~ (bitor_op ~ expression3)* }
@@ -279,7 +293,7 @@ expression7       = { expression8 ~ (shift_op ~ expression8)* }
 expression8       = { expression9 ~ (add_op ~ expression9)* }
 expression9       = { expression_unary ~ (mul_op ~ expression_unary)* }
 expression_unary  = { unary_op* ~ expression_factor }
-expression_factor = { ident | number | "(" ~ expression ~ ")" }
+expression_factor = { ident | number | "(" ~ ternary_expr ~ ")" }
 
 or_op     = { "||" }
 and_op    = { "&&" }
@@ -303,6 +317,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 - 各優先順位ルールは `(op ~ next)*` の繰り返し形にしている。単に `next ~ op ~ next`（1回だけ）にすると、演算子を含まない単項の式や3項以上の連鎖がパースできなくなる。
 - `rel_op`/`shift_op` は選択肢の順序が重要。PEGの選択はバックトラックせず最初に一致したものを採用するため、`"<"` を `"<="` より先に書くと `<=` の `=` が読めずに壊れる。長い演算子を先に置く必要がある（例: `"<="` の後に `"<"`）。
 - `unary_op`（前置の `!`）と `eq_op` の `!=` は文字が重なるが衝突しない。`unary_op` は「オペランドの開始位置」（`expression_unary` の先頭）でのみ試され、`!=` は「演算子の開始位置」（`eq_op` の位置、両オペランドの間）でのみ試されるため、同じ入力位置で競合することがない。
+- `ternary_expr` は二項演算子チェーン全体（`expression`）よりさらに外側にある。`stmt` の右辺と `expression_factor` の括弧の中身は、どちらも `expression` ではなく `ternary_expr` を参照することで、`a ? b : c` だけでなく `(a ? b : c) + 1` のように括弧内でも三項演算子を使えるようにしている。右結合にするため、then/else 側の再帰先はどちらも `ternary_expr` 自身（1つ下の優先順位ではなく自分自身）にしている。
 
 - `~` が連接、`|` が選択、`*` が0回以上の繰り返し、`?` が0回または1回、`()` がグループ化
 - `@{ ... }` はアトミックルール（内部で WHITESPACE をスキップしない）
@@ -345,6 +360,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Ident(usize)` — 信号ID参照
   - `Number(u64)` — 数値リテラル
   - `BinOp { op: BinOp, lhs: Box<ResolvedExpr>, rhs: Box<ResolvedExpr> }` — 二項演算
+  - `UnaryOp { op: UnOp, expr: Box<ResolvedExpr> }` — 前置単項演算
+  - `Ternary { cond: Box<ResolvedExpr>, then_branch: Box<ResolvedExpr>, else_branch: Box<ResolvedExpr> }` — 三項演算（条件式）
 
 `Elaborated` :
 
@@ -396,6 +413,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Ident(name)` → シンボルテーブルで ID に解決
   - `Number(n)` → そのまま
   - `BinOp { op, lhs, rhs }` → 左右を再帰解決して `ResolvedExpr::BinOp`
+  - `UnaryOp { op, expr }` → オペランドを再帰解決して `ResolvedExpr::UnaryOp`
+  - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰解決して `ResolvedExpr::Ternary`
 
 `check_combinational_loops(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :
 
@@ -430,6 +449,8 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `Ident(id)` → `[id]`
   - `Number(_)` → 空
   - `BinOp { lhs, rhs, .. }` → 左右を再帰収集して連結
+  - `UnaryOp { expr, .. }` → オペランドを再帰収集
+  - `Ternary { cond, then_branch, else_branch }` → 3つとも再帰収集して連結
 
 ---
 
@@ -463,6 +484,11 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     - `op` — 演算子
     - `operand` — オペランドのノードID
     - `width` — 結果のビット幅（`Not`なら1、`BitNot`ならオペランドと同じ幅）
+  - `Ternary { id: NodeId, cond: NodeId, then_branch: NodeId, else_branch: NodeId, width: u64 }` — 三項演算（条件式）
+    - `cond` — 条件のノードID
+    - `then_branch` — 条件が真の場合のノードID
+    - `else_branch` — 条件が偽の場合のノードID
+    - `width` — 結果のビット幅（then/elseの大きい方）
   - `Drive { id: NodeId, signal_id: usize, signal_name: String, source: NodeId, kind: DriveKind, width: u64 }` — 信号駆動
     - `signal_id` — 駆動する信号のID
     - `signal_name` — デバッグ用の信号名
@@ -511,8 +537,9 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `make_read_signal(&mut self, signal_id, name, width) -> NodeId` — 信号読み出しノードを生成
   - `make_binop(&mut self, op, lhs, rhs, width) -> NodeId` — 二項演算ノードを生成
   - `make_unaryop(&mut self, op, operand, width) -> NodeId` — 単項演算ノードを生成
+  - `make_ternary(&mut self, cond, then_branch, else_branch, width) -> NodeId` — 三項演算ノードを生成
   - `make_drive(&mut self, signal_id, name, source, kind, width) -> NodeId` — 駆動ノードを生成
-  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅）
+  - `build_expr(&mut self, expr, signals) -> NodeId` — 解決済み式からノードを構築（`BinOp`の結果幅は、`Or`/`And`/`Eq`/`Neq`/`Lt`/`Le`/`Gt`/`Ge`なら1ビット、それ以外は両オペランドの大きい方。`UnaryOp`の結果幅は、`Not`なら1ビット、`BitNot`ならオペランドと同じ幅。`Ternary`の結果幅は`then_branch`/`else_branch`の大きい方、`cond`は幅に影響しない）
   - `node_width(&self, node_id) -> u64` — ノードのビット幅を取得
 
 ### 関数
@@ -550,6 +577,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
     N  5: Drive(b)  (non-blocking)  <= N4
   ```
 - `UnaryOp` の表示例（`x = !a;` の場合）: `N  2: UnaryOp(!)  (1 bit)  = !N1`
+- `Ternary` の表示例（`x = a ? 1 : 0;` の場合）: `N  3: Ternary  (1 bit)  = N0 ? N1 : N2`
 
 ---
 
@@ -624,6 +652,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `ReadSignal` → `signal_values` から該当信号の値を返す
   - `BinOp` → 左右の子ノードを再帰評価し、`eval_binop` で演算子を適用する
   - `UnaryOp` → オペランドノードを再帰評価し、`eval_unaryop` で演算子を適用する
+  - `Ternary` → `cond`/`then_branch`/`else_branch` を3つとも再帰評価し（ハードウェア的にはマルチプレクサなので選ばれない側も含めて常に評価する）、`cond`が0以外なら`then_branch`、0なら`else_branch`の値を返す
   - `Drive` → ソースノードを再帰評価して返す（値をそのまま中継）
 
 `eval_binop(op: BinOp, l: u64, r: u64) -> u64` :
@@ -725,7 +754,6 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 | 追加したい機能                        | 変更するファイル                                                                                                           |
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | 単項マイナス（`-a`）                  | `ast.rs` (UnOp::Neg 追加), `grammar.pest` (unary_opに`-`追加), `parser.rs`, `netlist.rs`, `simulator.rs`                   |
-| 三項演算子（`cond ? a : b`）          | `ast.rs` (Expr 拡張), `grammar.pest` (expressionの最上位に追加), `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`     |
 | ビットベクタリテラル（`7'b000_0001`） | `grammar.pest` (numberルール拡張), `ast.rs` (Expr 拡張), `parser.rs`                                                       |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |

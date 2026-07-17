@@ -67,6 +67,12 @@ pub enum Expr {
         op: UnOp,
         expr: Box<Expr>,
     },
+    /// 三項演算（条件式） `cond ? then_branch : else_branch`
+    Ternary {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
 }
 
 /// 単項演算子

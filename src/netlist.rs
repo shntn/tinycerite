@@ -37,6 +37,14 @@ pub enum Node {
         operand: NodeId,
         width: u64,
     },
+    /// 三項演算（条件式）
+    Ternary {
+        id: NodeId,
+        cond: NodeId,
+        then_branch: NodeId,
+        else_branch: NodeId,
+        width: u64,
+    },
     /// 信号駆動（組み合わせ）
     Drive {
         id: NodeId,
@@ -114,6 +122,7 @@ impl NetlistBuilder {
             Node::ReadSignal { id, .. } => *id,
             Node::BinOp { id, .. } => *id,
             Node::UnaryOp { id, .. } => *id,
+            Node::Ternary { id, .. } => *id,
             Node::Drive { id, .. } => *id,
         };
         self.nodes.push(node);
@@ -143,6 +152,11 @@ impl NetlistBuilder {
     fn make_unaryop(&mut self, op: UnOp, operand: NodeId, width: u64) -> NodeId {
         let id = self.alloc_id();
         self.add_node(Node::UnaryOp { id, op, operand, width })
+    }
+
+    fn make_ternary(&mut self, cond: NodeId, then_branch: NodeId, else_branch: NodeId, width: u64) -> NodeId {
+        let id = self.alloc_id();
+        self.add_node(Node::Ternary { id, cond, then_branch, else_branch, width })
     }
 
     fn make_drive(
@@ -199,6 +213,14 @@ impl NetlistBuilder {
                 };
                 self.make_unaryop(*op, operand_id, width)
             }
+            ResolvedExpr::Ternary { cond, then_branch, else_branch } => {
+                let cond_id = self.build_expr(cond, signals);
+                let then_id = self.build_expr(then_branch, signals);
+                let else_id = self.build_expr(else_branch, signals);
+                // 結果の幅はthen/elseの大きい方（condは選択にのみ使い、幅には影響しない）
+                let width = self.node_width(then_id).max(self.node_width(else_id));
+                self.make_ternary(cond_id, then_id, else_id, width)
+            }
         }
     }
 
@@ -208,6 +230,7 @@ impl NetlistBuilder {
             Node::ReadSignal { width, .. } => *width,
             Node::BinOp { width, .. } => *width,
             Node::UnaryOp { width, .. } => *width,
+            Node::Ternary { width, .. } => *width,
             Node::Drive { width, .. } => *width,
         }
     }
@@ -297,6 +320,12 @@ pub fn format_netlist(nl: &Netlist) -> String {
                 out.push_str(&format!(
                     "  N{:>3}: UnaryOp({})  ({} bit)  = {}N{}\n",
                     id, op, width, op, operand,
+                ));
+            }
+            Node::Ternary { id, cond, then_branch, else_branch, width } => {
+                out.push_str(&format!(
+                    "  N{:>3}: Ternary  ({} bit)  = N{} ? N{} : N{}\n",
+                    id, width, cond, then_branch, else_branch,
                 ));
             }
             Node::Drive { id, signal_name, source, kind, .. } => {

@@ -228,6 +228,55 @@ fn unary_operator_binds_tighter_than_multiplication() {
 }
 
 #[test]
+fn ternary_operator_parses_as_ternary_expr() {
+    let prog = parse("{ var x: bit; var a: bit; x = a ? 1 : 0; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => {
+            assert!(matches!(expr, Expr::Ternary { .. }));
+        }
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn ternary_operator_is_right_associative() {
+    // a ? b : c ? d : e は a ? b : (c ? d : e) になるはず
+    let prog = parse("{ var x: bit; var a: bit; var c: bit; x = a ? 1 : c ? 2 : 3; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => match expr {
+            Expr::Ternary { else_branch, .. } => {
+                assert!(matches!(**else_branch, Expr::Ternary { .. }));
+            }
+            _ => panic!("最外は Ternary であるべき"),
+        },
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn ternary_operator_has_lower_precedence_than_binary_operators() {
+    // a || b ? 1 : 0 は (a || b) ? 1 : 0 になるはず（condが二項式全体）
+    let prog = parse("{ var x: bit; var a: bit; var b: bit; x = a || b ? 1 : 0; }");
+    let stmt = &prog.blocks[0].stmts[0];
+    match stmt {
+        Stmt::Combinational { expr, .. } => match expr {
+            Expr::Ternary { cond, .. } => {
+                assert!(matches!(**cond, Expr::BinOp { op: BinOp::Or, .. }));
+            }
+            _ => panic!("最外は Ternary であるべき"),
+        },
+        _ => panic!("comb assign が期待される"),
+    }
+}
+
+#[test]
+fn parenthesized_ternary_expression_parses_successfully() {
+    assert!(Parser::parse_program("{ var x: bit; var a: bit; x = (a ? 1 : 0) + 1; }").is_ok());
+}
+
+#[test]
 fn not_equal_operator_is_unaffected_by_unary_not() {
     // "!=" は eq_op として扱われ、単項の "!" とは別物であることを確認
     let prog = parse("{ var x: bit; var y: bit; x = y != 1; }");

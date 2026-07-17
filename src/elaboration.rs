@@ -53,6 +53,11 @@ pub enum ResolvedExpr {
         op: UnOp,
         expr: Box<ResolvedExpr>,
     },
+    Ternary {
+        cond: Box<ResolvedExpr>,
+        then_branch: Box<ResolvedExpr>,
+        else_branch: Box<ResolvedExpr>,
+    },
 }
 
 /// エラボレーション結果
@@ -229,6 +234,12 @@ fn collect_read_signals(expr: &ResolvedExpr) -> Vec<usize> {
             v
         }
         ResolvedExpr::UnaryOp { expr, .. } => collect_read_signals(expr),
+        ResolvedExpr::Ternary { cond, then_branch, else_branch } => {
+            let mut v = collect_read_signals(cond);
+            v.extend(collect_read_signals(then_branch));
+            v.extend(collect_read_signals(else_branch));
+            v
+        }
     }
 }
 
@@ -255,6 +266,16 @@ fn resolve_expr(expr: &Expr, symtab: &SymbolTable) -> Result<ResolvedExpr> {
             Ok(ResolvedExpr::UnaryOp {
                 op: *op,
                 expr: Box::new(expr),
+            })
+        }
+        Expr::Ternary { cond, then_branch, else_branch } => {
+            let cond = resolve_expr(cond, symtab)?;
+            let then_branch = resolve_expr(then_branch, symtab)?;
+            let else_branch = resolve_expr(else_branch, symtab)?;
+            Ok(ResolvedExpr::Ternary {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
             })
         }
     }

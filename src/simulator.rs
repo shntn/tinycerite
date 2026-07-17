@@ -130,6 +130,13 @@ fn eval_node(node_id: NodeId, nodes: &[Node], signal_values: &[u64]) -> u64 {
             let v = eval_node(*operand, nodes, signal_values);
             eval_unaryop(*op, v)
         }
+        Node::Ternary { cond, then_branch, else_branch, .. } => {
+            // ハードウェア的にはマルチプレクサなので、両分岐とも常に評価してから選択する
+            let c = eval_node(*cond, nodes, signal_values);
+            let t = eval_node(*then_branch, nodes, signal_values);
+            let e = eval_node(*else_branch, nodes, signal_values);
+            if c != 0 { t } else { e }
+        }
         Node::Drive { source, .. } => eval_node(*source, nodes, signal_values),
     }
 }
