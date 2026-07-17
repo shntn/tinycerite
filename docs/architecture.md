@@ -668,13 +668,25 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef>` :
 
-- 概要: 1つのモジュール定義を解決・検証する。ポートも内部信号もこの関数のローカルなシンボルテーブルに登録され、この関数の中で完結する（インスタンス化の回数に関わらず1回だけ実行される）。
+- 概要: 1つのモジュール定義を解決・検証する。ポートも内部信号もこの関数のローカルなシンボルテーブルに登録され、この関数の中で完結する（インスタンス化の回数に関わらず1回だけ実行される）。処理自体は`resolve_module_ports`・`resolve_module_decls`・`resolve_module_stmts`の3つの補助関数に分割されており、`resolve_module_def`はそれらを順に呼び出して静的チェックをかけるだけの薄い関数になっている。
 - 処理:
-  1. ポート（`m.ports`）を先に信号として登録（重複ポート名はエラー）、`ResolvedPort`（向き・ローカル信号ID）も同時に構築
-  2. 内部の `var` 宣言（`m.decls`）を続けて登録（重複はエラー）
-  3. 本体の代入文（`m.stmts`）を解決。代入先が`input`ポートの場合はエラー（`input`は外部から供給されるため内部で駆動できない）。式の解決には`resolve_expr`を使うが、モジュール本体は現状インスタンスを持てないため、空の`InstanceTable`と空のモジュールテーブルを渡す
+  1. `resolve_module_ports`でポートを信号として登録し、信号リスト・シンボルテーブル・`ResolvedPort`リストを得る
+  2. `resolve_module_decls`で内部の`var`宣言を同じ信号リスト・シンボルテーブルに追加登録（1のポート用シンボルテーブルを可変参照で受け取り、そのまま拡張する）
+  3. `resolve_module_stmts`で本体の代入文を解決
   4. `check_multiple_drivers`・`check_combinational_loops` を適用（`input`ポートは代入先になり得ないため、これらの関数自体に変更は不要）
   5. `ResolvedModuleDef { name, ports, body: ResolvedScope { signals, stmts, instances: vec![] } }` を返す
+
+`resolve_module_ports(m: &ModuleDef) -> Result<(Vec<ResolvedSignal>, SymbolTable, Vec<ResolvedPort>)>` :
+
+- 概要: モジュールのポート宣言（`m.ports`）を信号として登録する（重複ポート名はエラー）。`ResolvedPort`（向き・ローカル信号ID）も同時に構築する。
+
+`resolve_module_decls(m: &ModuleDef, signals: &mut Vec<ResolvedSignal>, symtab: &mut SymbolTable) -> Result<()>` :
+
+- 概要: モジュール本体の`var`宣言（`m.decls`）を、`resolve_module_ports`が作った信号リスト・シンボルテーブルに追加登録する（重複宣言はエラー）。ポートと内部信号が同じフラットな信号空間に合流する。
+
+`resolve_module_stmts(m: &ModuleDef, symtab: &SymbolTable, ports: &[ResolvedPort]) -> Result<Vec<ResolvedStmt>>` :
+
+- 概要: モジュール本体の代入文（`m.stmts`）を解決する。代入先が`input`ポートの場合はエラー（`input`は外部から供給されるため内部で駆動できない）。式の解決には`resolve_expr`を使うが、モジュール本体は現状インスタンスを持てないため、空の`InstanceTable`と空のモジュールテーブルを渡す。
 
 `elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(ResolvedScope, SymbolTable, InstanceTable)>` :
 
