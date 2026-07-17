@@ -524,6 +524,34 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 - `Display` 実装: `Combinational` → `"blocking"`, `Sequential` → `"non-blocking"`
 
+`Edge` (enum) :
+
+- 役割: クロック/リセットのエッジの向き。
+- バリアント: `Posedge`（立ち上がり） `Negedge`（立ち下がり）
+
+`ClockTrigger` :
+
+- 役割: reg更新やリセットのトリガーとなる信号とエッジ。
+- フィールド:
+  - `signal_id: usize` — トリガーとなる信号のID
+  - `edge: Edge` — トリガーとするエッジ
+
+`ResetSpec` :
+
+- 役割: regのリセット仕様。
+- フィールド:
+  - `trigger: ClockTrigger` — リセットのトリガー
+  - `value: u64` — リセット時に設定する値
+
+`SignalKind` (enum) :
+
+- 役割: 信号の種別（wire/reg）。`wire`/`reg`宣言構文の先行対応として、regにクロック/リセット情報を持たせられるようにしている。現状は宣言構文が無いため`clock`/`reset`は常に`None`（既存の`<=`と同じ、ステップ単位での更新という現行の挙動のまま）。`kind`自体は既存の代入演算子（`=`/`<=`）から`build_netlist`が自動的に決定する（構文もチェックも増えていない、内部データの後付け）。
+- バリアント:
+  - `Wire` — 組み合わせ駆動、または未駆動の信号
+  - `Reg { clock: Option<ClockTrigger>, reset: Option<ResetSpec> }` — 順序駆動の信号
+    - `clock` — 更新のトリガー（`None` = クロック未指定、既存のステップ単位更新のまま）
+    - `reset` — リセットの仕様（`None` = リセット無し）
+
 `Netlist` :
 
 - 役割: 生成されたネットリスト全体。
@@ -540,6 +568,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
   - `width: u64` — ビット幅
   - `driver_node: Option<NodeId>` — この信号を駆動する Drive ノードのID（未駆動 = None）
   - `driver_kind: Option<DriveKind>` — 駆動の種類（未駆動 = None）
+  - `kind: SignalKind` — 信号の種別（wire/reg）。`Combinational`駆動または未駆動なら`Wire`、`Sequential`駆動なら`Reg { clock: None, reset: None }`
 
 `NetlistBuilder` :
 
@@ -567,11 +596,12 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 - 概要: エラボレーション結果からネットリストを生成する。
 - 処理:
-  1. `Elaborated.signals` から `NetlistSignal` のリストを作成（driver情報は初期化時点では None）
+  1. `Elaborated.signals` から `NetlistSignal` のリストを作成（driver情報は初期化時点では None、`kind` は初期値 `SignalKind::Wire`）
   2. 各 `ResolvedStmt` について:
      - `build_expr()` で右辺の式ノードを構築
      - `make_drive()` で駆動ノードを生成
      - 対応する信号の `driver_node`/`driver_kind` を更新
+     - `Sequential` の場合のみ `kind` を `SignalKind::Reg { clock: None, reset: None }` に更新（`Combinational`は初期値の`Wire`のまま）
   3. `Netlist { signals, nodes }` を返す
 
 `format_netlist(nl: &Netlist) -> String` :
@@ -774,6 +804,7 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | 単項マイナス（`-a`）                  | `ast.rs` (UnOp::Neg 追加), `grammar.pest` (unary_opに`-`追加), `parser.rs`, `netlist.rs`, `simulator.rs`                   |
 | ビットベクタリテラルの桁区切り（`8'b0000_0001`） | `grammar.pest` (literal_digitsに`_`許容), `parser.rs` (パース時に`_`除去)                                    |
+| `wire`/`reg`宣言構文（クロック/リセット指定） | `grammar.pest`, `ast.rs` (Decl 拡張), `parser.rs`, `netlist.rs` (build_netlistで`SignalKind::Reg`の`clock`/`reset`を実際に埋める), `simulator.rs` (エッジ検出評価。`clock: None`の信号は現行のstep単位更新のまま据え置き) |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュール・ポート                    | `grammar.pest`, `ast.rs` (Module 追加), `parser.rs`, `elaboration.rs` (階層解決)                                           |
 | VCD ダンプ                            | `simulator.rs` (format_waveform の代わりに VCD 出力)                                                                       |

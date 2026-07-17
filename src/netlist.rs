@@ -73,6 +73,43 @@ impl fmt::Display for DriveKind {
     }
 }
 
+/// クロック/リセットのエッジの向き
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edge {
+    Posedge,
+    Negedge,
+}
+
+/// reg更新やリセットのトリガーとなる信号とエッジ
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockTrigger {
+    pub signal_id: usize,
+    pub edge: Edge,
+}
+
+/// reg のリセット仕様
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetSpec {
+    pub trigger: ClockTrigger,
+    pub value: u64,
+}
+
+/// 信号の種別（wire/reg）
+///
+/// wire/reg宣言構文の先行対応として、regにクロック/リセット情報を持たせられる
+/// ようにしている。現状は宣言構文が無いため、`clock`/`reset`は常に`None`
+/// （= 既存の`<=`と同じ、ステップ単位での更新という現行の挙動のまま）。
+/// `kind`自体は既存の代入演算子（`=`/`<=`）から`build_netlist`が自動的に
+/// 決定し、`Combinational`駆動なら`Wire`、`Sequential`駆動なら`Reg`になる。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalKind {
+    Wire,
+    Reg {
+        clock: Option<ClockTrigger>,
+        reset: Option<ResetSpec>,
+    },
+}
+
 /// 生成されたネットリスト
 #[derive(Debug, Clone)]
 pub struct Netlist {
@@ -88,6 +125,7 @@ pub struct NetlistSignal {
     pub width: u64,
     pub driver_node: Option<NodeId>,
     pub driver_kind: Option<DriveKind>,
+    pub kind: SignalKind,
 }
 
 /// ネットリストビルダー
@@ -253,6 +291,7 @@ pub fn build_netlist(elab: &Elaborated) -> Netlist {
             width: s.width,
             driver_node: None,
             driver_kind: None,
+            kind: SignalKind::Wire,
         })
         .collect();
 
@@ -274,6 +313,7 @@ pub fn build_netlist(elab: &Elaborated) -> Netlist {
                 let drive = builder.make_drive(*target_id, &sig.name, src, DriveKind::Sequential, sig.width);
                 signals[*target_id].driver_node = Some(drive);
                 signals[*target_id].driver_kind = Some(DriveKind::Sequential);
+                signals[*target_id].kind = SignalKind::Reg { clock: None, reset: None };
             }
         }
     }

@@ -1,5 +1,5 @@
 use tinycerilte::elaboration;
-use tinycerilte::netlist::{self, DriveKind};
+use tinycerilte::netlist::{self, DriveKind, SignalKind};
 use tinycerilte::parser::Parser;
 
 fn netlist_of(input: &str) -> netlist::Netlist {
@@ -69,4 +69,29 @@ fn bit_width_one_by_default() {
     let input = "{ var x: bit; x = 0; }";
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].width, 1);
+}
+
+#[test]
+fn combinational_signal_defaults_to_wire_kind() {
+    let input = "{ var a: bit; var b: bit; a = b ^ 1; }";
+    let nl = netlist_of(input);
+    assert_eq!(nl.signals[0].kind, SignalKind::Wire);
+}
+
+#[test]
+fn sequential_signal_defaults_to_reg_kind_with_no_clock_or_reset() {
+    let input = "{ var a: bit; var b: bit; b <= a; }";
+    let nl = netlist_of(input);
+    assert_eq!(
+        nl.signals[1].kind,
+        SignalKind::Reg { clock: None, reset: None },
+        "クロック/リセット未指定は現行のstep単位更新のまま"
+    );
+}
+
+#[test]
+fn undriven_signal_defaults_to_wire_kind() {
+    let input = "{ var a: bit; }";
+    let nl = netlist_of(input);
+    assert_eq!(nl.signals[0].kind, SignalKind::Wire);
 }
