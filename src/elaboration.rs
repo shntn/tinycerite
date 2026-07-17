@@ -346,52 +346,12 @@ fn build_instances(
         .chain(prog.testbenches.iter().flat_map(|t| &t.instances));
 
     for inst in all_instances {
-        if symtab.contains_key(&inst.instance_name) || instance_table.contains_key(&inst.instance_name) {
-            return Err(ElabError {
-                message: format!("'{}' という名前が信号またはインスタンスと重複しています", inst.instance_name),
-            });
-        }
+        check_instance_name_available(&inst.instance_name, symtab, &instance_table)?;
         let module_def = modules.get(&inst.module_name).ok_or_else(|| ElabError {
             message: format!("モジュール '{}' が定義されていません", inst.module_name),
         })?;
 
-        let input_ports: Vec<&ResolvedPort> =
-            module_def.ports.iter().filter(|p| p.direction == Direction::Input).collect();
-
-        let mut connections = HashMap::new();
-        for (arg_name, arg_expr) in &inst.args {
-            let is_input_port = input_ports.iter().any(|p| &p.name == arg_name);
-            if !is_input_port {
-                let is_output_port = module_def.ports.iter().any(|p| &p.name == arg_name && p.direction == Direction::Output);
-                let message = if is_output_port {
-                    format!(
-                        "'{}' はモジュール '{}' の出力ポートです。インスタンス化時には入力ポートのみ指定できます",
-                        arg_name, inst.module_name
-                    )
-                } else {
-                    format!("モジュール '{}' に入力ポート '{}' はありません", inst.module_name, arg_name)
-                };
-                return Err(ElabError { message });
-            }
-            if connections.contains_key(arg_name) {
-                return Err(ElabError {
-                    message: format!("引数 '{}' が重複しています", arg_name),
-                });
-            }
-            let resolved_expr = resolve_expr(arg_expr, symtab, &resolved_so_far, modules)?;
-            connections.insert(arg_name.clone(), resolved_expr);
-        }
-
-        for p in &input_ports {
-            if !connections.contains_key(&p.name) {
-                return Err(ElabError {
-                    message: format!(
-                        "モジュール '{}' の入力ポート '{}' が接続されていません",
-                        inst.module_name, p.name
-                    ),
-                });
-            }
-        }
+        let connections = resolve_instance_connections(inst, module_def, symtab, &resolved_so_far, modules)?;
 
         instance_table.insert(inst.instance_name.clone(), inst.module_name.clone());
         resolved_so_far.insert(inst.instance_name.clone(), inst.module_name.clone());
@@ -403,6 +363,66 @@ fn build_instances(
     }
 
     Ok((instances, instance_table))
+}
+
+/// インスタンス名が信号名・既存インスタンス名のどちらとも重複していないか確認する
+fn check_instance_name_available(name: &str, symtab: &SymbolTable, instance_table: &InstanceTable) -> Result<()> {
+    if symtab.contains_key(name) || instance_table.contains_key(name) {
+        return Err(ElabError {
+            message: format!("'{}' という名前が信号またはインスタンスと重複しています", name),
+        });
+    }
+    Ok(())
+}
+
+/// 1つのインスタンス化の引数（名前付き接続式）を、対象モジュールの入力ポート定義と
+/// 突き合わせて解決する。出力ポート指定・未知のポート名・引数の重複・未接続の入力ポートはエラー
+fn resolve_instance_connections(
+    inst: &InstDecl,
+    module_def: &ResolvedModuleDef,
+    symtab: &SymbolTable,
+    resolved_so_far: &InstanceTable,
+    modules: &HashMap<String, ResolvedModuleDef>,
+) -> Result<HashMap<String, ResolvedExpr>> {
+    let input_ports: Vec<&ResolvedPort> =
+        module_def.ports.iter().filter(|p| p.direction == Direction::Input).collect();
+
+    let mut connections = HashMap::new();
+    for (arg_name, arg_expr) in &inst.args {
+        let is_input_port = input_ports.iter().any(|p| &p.name == arg_name);
+        if !is_input_port {
+            let is_output_port = module_def.ports.iter().any(|p| &p.name == arg_name && p.direction == Direction::Output);
+            let message = if is_output_port {
+                format!(
+                    "'{}' はモジュール '{}' の出力ポートです。インスタンス化時には入力ポートのみ指定できます",
+                    arg_name, inst.module_name
+                )
+            } else {
+                format!("モジュール '{}' に入力ポート '{}' はありません", inst.module_name, arg_name)
+            };
+            return Err(ElabError { message });
+        }
+        if connections.contains_key(arg_name) {
+            return Err(ElabError {
+                message: format!("引数 '{}' が重複しています", arg_name),
+            });
+        }
+        let resolved_expr = resolve_expr(arg_expr, symtab, resolved_so_far, modules)?;
+        connections.insert(arg_name.clone(), resolved_expr);
+    }
+
+    for p in &input_ports {
+        if !connections.contains_key(&p.name) {
+            return Err(ElabError {
+                message: format!(
+                    "モジュール '{}' の入力ポート '{}' が接続されていません",
+                    inst.module_name, p.name
+                ),
+            });
+        }
+    }
+
+    Ok(connections)
 }
 
 /// 代入文を走査し、変数名をシンボルIDに解決する（未宣言変数はエラー）

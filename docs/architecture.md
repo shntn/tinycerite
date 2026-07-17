@@ -709,8 +709,17 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `build_instances(prog: &Program, symtab: &SymbolTable, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(Vec<ResolvedInstance>, InstanceTable)>` :
 
-- 概要: 全ブロック＋テストベンチの並行部分のモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。
-- 処理: インスタンス名が信号名・他のインスタンス名と重複していないか検査 → 参照するモジュールが定義されているか検査 → 各引数が実在する`input`ポート名か（`output`ポート名を指定した場合や存在しないポート名は専用のエラーメッセージ）、重複していないかを検査 → 引数式を`resolve_expr`で解決（この時点までに解決済みの同スコープの他インスタンスも参照できるよう、インスタンステーブルを育てながら解決する）→ 全`input`ポート分の接続が揃っているか検査。
+- 概要: 全ブロック＋テストベンチの並行部分のモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。1件ずつの検査・解決は`check_instance_name_available`・`resolve_instance_connections`の2つの補助関数に切り出されており、`build_instances`自体はループを回してインスタンステーブルを育てながら結果を集約するだけになっている。
+- 処理: 各インスタンス化について、`check_instance_name_available`でインスタンス名の重複を検査 → 参照するモジュールが定義されているか検査 → `resolve_instance_connections`で引数をポート定義と突き合わせて解決 → インスタンステーブル（`instance_table`と、後続の接続式解決からも見える`resolved_so_far`の両方）に登録し、`ResolvedInstance`を積み上げる。
+
+`check_instance_name_available(name: &str, symtab: &SymbolTable, instance_table: &InstanceTable) -> Result<()>` :
+
+- 概要: インスタンス名が信号名・既存のインスタンス名のどちらとも重複していないか検査する（重複していればエラー）。
+
+`resolve_instance_connections(inst: &InstDecl, module_def: &ResolvedModuleDef, symtab: &SymbolTable, resolved_so_far: &InstanceTable, modules: &HashMap<String, ResolvedModuleDef>) -> Result<HashMap<String, ResolvedExpr>>` :
+
+- 概要: 1つのインスタンス化の引数（名前付き接続式）を、対象モジュールの入力ポート定義と突き合わせて解決する。
+- 処理: 各引数が実在する`input`ポート名か（`output`ポート名を指定した場合や存在しないポート名は専用のエラーメッセージ）、重複していないかを検査 → 引数式を`resolve_expr`で解決（`resolved_so_far`を渡すことで、この時点までに解決済みの同スコープの他インスタンスも参照できる）→ 全`input`ポート分の接続が揃っているか検査。
 
 `resolve_stmts(prog, symtab, instances, modules) -> Result<Vec<ResolvedStmt>>` :
 
