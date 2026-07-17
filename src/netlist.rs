@@ -97,11 +97,12 @@ pub struct ResetSpec {
 
 /// 信号の種別（wire/reg）
 ///
-/// wire/reg宣言構文の先行対応として、regにクロック/リセット情報を持たせられる
-/// ようにしている。現状は宣言構文が無いため、`clock`/`reset`は常に`None`
-/// （= 既存の`<=`と同じ、ステップ単位での更新という現行の挙動のまま）。
-/// `kind`自体は既存の代入演算子（`=`/`<=`）から`build_netlist`が自動的に
-/// 決定し、`Combinational`駆動なら`Wire`、`Sequential`駆動なら`Reg`になる。
+/// `reg`/`wire`を区別する宣言キーワードは無く、`kind`は既存の代入演算子
+/// （`=`/`<=`）から`build_netlist`が自動的に決定する（`Combinational`駆動なら
+/// `Wire`、`Sequential`駆動なら`Reg`）。`Reg`の`clock`は、そのregがモジュール
+/// 本体に属し、かつそのモジュールに`clock`型入力ポートがあれば`Some`
+/// （トップレベル/テストベンチ直下のregはモジュールに属さないため常に`None`）。
+/// `reset`は現状常に`None`（先行実装のみで未使用）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignalKind {
     Wire,
@@ -239,14 +240,20 @@ impl NetlistBuilder {
     /// スコープ（トップレベルまたはモジュール本体）をフラットな信号・ノードへ展開する
     ///
     /// `prefix`は展開後の信号名に付ける名前空間（トップレベルは空文字列、インスタンスは
-    /// `"u1"`のようなインスタンス名）。戻り値はこのスコープのローカル信号ID→グローバル
-    /// 信号IDのリマップと、このスコープが直接持つインスタンスのリマップ
-    /// （呼び出し元がポート接続や、トップレベルなら`initial`の式構築に使う）。
+    /// `"u1"`のようなインスタンス名）。`clock_port`は、このスコープがモジュール本体の場合に
+    /// そのモジュールの`clock`型入力ポートのローカル信号ID（エラボレーションで高々1つに
+    /// 限定済み）、トップレベルの場合は常に`None`。regの`SignalKind::Reg.clock`を
+    /// 決定するのに使う（モジュールの外のreg、例えばテストベンチの`counter <= counter + 1;`
+    /// のようなものは、モジュールに属さないためクロックを持たない）。
+    /// 戻り値はこのスコープのローカル信号ID→グローバル信号IDのリマップと、このスコープが
+    /// 直接持つインスタンスのリマップ（呼び出し元がポート接続や、トップレベルなら`initial`の
+    /// 式構築に使う）。
     fn flatten_scope(
         &mut self,
         scope: &ResolvedScope,
         prefix: &str,
         modules: &HashMap<String, ResolvedModuleDef>,
+        clock_port: Option<usize>,
     ) -> (Vec<usize>, InstanceRemaps) {
         let base = self.signals.len();
         for sig in &scope.signals {
@@ -265,7 +272,7 @@ impl NetlistBuilder {
         for inst in &scope.instances {
             let module_def = &modules[&inst.module_name];
             let inst_prefix = scoped_name(prefix, &inst.instance_name);
-            let (inst_remap, _) = self.flatten_scope(&module_def.body, &inst_prefix, modules);
+            let (inst_remap, _) = self.flatten_scope(&module_def.body, &inst_prefix, modules, module_def.clock_port);
 
             // 入力ポートへの接続を、外側スコープの式から合成の組み合わせDriveとして生成する
             for port in module_def.ports.iter().filter(|p| p.direction == Direction::Input) {
@@ -287,7 +294,13 @@ impl NetlistBuilder {
                     let src = self.build_expr(expr, &remap, &instance_remaps, modules);
                     let target_global = remap[*target_id];
                     self.drive_signal(target_global, src, DriveKind::Sequential);
-                    self.signals[target_global].kind = SignalKind::Reg { clock: None, reset: None };
+                    let clock = clock_port.map(|local_id| ClockTrigger {
+                        signal_id: remap[local_id],
+                        // TODO: 暫定的にposedge固定。negedge/両エッジのサポートは未実装のため、
+                        // clock型入力ポートを持つモジュールのregは常にposedgeトリガーとして扱う。
+                        edge: Edge::Posedge,
+                    });
+                    self.signals[target_global].kind = SignalKind::Reg { clock, reset: None };
                 }
             }
         }
@@ -407,7 +420,7 @@ fn scoped_name(prefix: &str, name: &str) -> String {
 /// 今まで通り変更不要。
 pub fn build_netlist(elab: &Elaborated) -> Netlist {
     let mut builder = NetlistBuilder::new();
-    let (remap, instance_remaps) = builder.flatten_scope(&elab.top, "", &elab.modules);
+    let (remap, instance_remaps) = builder.flatten_scope(&elab.top, "", &elab.modules, None);
 
     let mut initial = Vec::new();
     for step in &elab.initial {

@@ -83,7 +83,9 @@ fn signal_declared_in_later_block_is_visible_to_earlier_block_stmt() {
 }
 
 fn adder_src() -> &'static str {
-    "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; }"
+    // ここでのテストはモジュール/インスタンス解決の仕組みが対象であり、reg(順序代入)の
+    // clock要件とは無関係なため、組合せ代入で十分（clock入力ポート無しで書ける）
+    "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum = a + b; }"
 }
 
 #[test]

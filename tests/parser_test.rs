@@ -1,4 +1,4 @@
-use tinycerilte::ast::{BinOp, Direction, Expr, ProcStmt, Stmt, UnOp};
+use tinycerilte::ast::{BinOp, Direction, Expr, ProcStmt, SignalType, Stmt, UnOp};
 use tinycerilte::parser::Parser;
 
 fn parse(input: &str) -> tinycerilte::ast::Program {
@@ -19,7 +19,7 @@ fn single_bit_declaration() {
     let prog = parse("{ var x: bit; }");
     let decl = &prog.blocks[0].decls[0];
     assert_eq!(decl.name, "x");
-    assert_eq!(decl.width, None, "bit は幅なし = 1-bit");
+    assert_eq!(decl.sig_type, SignalType::Bit(None), "bit は幅なし = 1-bit");
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn bit_vector_declaration() {
     let prog = parse("{ var x: bit<8>; }");
     let decl = &prog.blocks[0].decls[0];
     assert_eq!(decl.name, "x");
-    assert_eq!(decl.width, Some(8));
+    assert_eq!(decl.sig_type, SignalType::Bit(Some(8)));
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn module_def_parses_ports_and_body() {
     assert_eq!(m.ports.len(), 3);
     assert_eq!(m.ports[0].name, "a");
     assert_eq!(m.ports[0].direction, Direction::Input);
-    assert_eq!(m.ports[0].width, Some(8));
+    assert_eq!(m.ports[0].sig_type, SignalType::Bit(Some(8)));
     assert_eq!(m.ports[2].name, "sum");
     assert_eq!(m.ports[2].direction, Direction::Output);
     assert_eq!(m.stmts.len(), 1);

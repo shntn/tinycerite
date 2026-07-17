@@ -8,7 +8,7 @@ use crate::ast::*;
 fn is_keyword(s: &str) -> bool {
     matches!(
         s,
-        "var" | "bit" | "module" | "port" | "input" | "output" | "testbench" | "initial" | "step"
+        "var" | "bit" | "clock" | "module" | "port" | "input" | "output" | "testbench" | "initial" | "step"
     )
 }
 
@@ -122,11 +122,11 @@ fn parse_port_block(pair: Pair<Rule>) -> Result<Vec<PortDecl>> {
     Ok(ports)
 }
 
-/// `port_decl`（`ident ~ ":" ~ direction ~ "bit" ~ ("<" ~ number ~ ">")? ~ ";"`）をパースする
+/// `port_decl`（`ident ~ ":" ~ direction ~ signal_type ~ ";"`）をパースする
 fn parse_port_decl(pair: Pair<Rule>) -> Result<PortDecl> {
     let mut name = String::new();
     let mut direction = None;
-    let mut width = None;
+    let mut sig_type = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -145,20 +145,36 @@ fn parse_port_decl(pair: Pair<Rule>) -> Result<PortDecl> {
                     _ => unreachable!("direction は input か output のみ"),
                 });
             }
-            Rule::number => {
-                width = Some(inner.as_str().parse::<u64>().map_err(|e| ParseError {
-                    message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
-                })?);
-            }
-            _ => {} // ":" "bit" "<" ">" ";" は無視
+            Rule::signal_type => sig_type = Some(parse_signal_type(inner)?),
+            _ => {} // ":" ";" は無視
         }
     }
 
     let direction = direction.ok_or_else(|| ParseError {
         message: "ポートの向き（input/output）が見つかりません".to_string(),
     })?;
+    let sig_type = sig_type.ok_or_else(|| ParseError {
+        message: "ポートの型（bit/clock）が見つかりません".to_string(),
+    })?;
 
-    Ok(PortDecl { name, direction, width })
+    Ok(PortDecl { name, direction, sig_type })
+}
+
+/// `signal_type`（`"clock" | ("bit" ~ ("<" ~ number ~ ">")?)`）をパースする
+fn parse_signal_type(pair: Pair<Rule>) -> Result<SignalType> {
+    if pair.as_str().starts_with("clock") {
+        return Ok(SignalType::Clock);
+    }
+
+    let mut width = None;
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::number {
+            width = Some(inner.as_str().parse::<u64>().map_err(|e| ParseError {
+                message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
+            })?);
+        }
+    }
+    Ok(SignalType::Bit(width))
 }
 
 /// `testbench_def`（`"testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}"`）をパースする
@@ -285,7 +301,7 @@ fn parse_named_arg(pair: Pair<Rule>) -> Result<(String, Expr)> {
 
 fn parse_decl(pair: Pair<Rule>) -> Result<Decl> {
     let mut name = String::new();
-    let mut width = None;
+    let mut sig_type = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -297,21 +313,16 @@ fn parse_decl(pair: Pair<Rule>) -> Result<Decl> {
                     });
                 }
             }
-            Rule::number => {
-                width = Some(
-                    inner
-                        .as_str()
-                        .parse::<u64>()
-                        .map_err(|e| ParseError {
-                            message: format!("数値パース失敗: {} ({})", inner.as_str(), e),
-                        })?,
-                );
-            }
-            _ => {} // "var" ":" "bit" "<" ">" ";" は無視
+            Rule::signal_type => sig_type = Some(parse_signal_type(inner)?),
+            _ => {} // "var" ":" ";" は無視
         }
     }
 
-    Ok(Decl { name, width })
+    let sig_type = sig_type.ok_or_else(|| ParseError {
+        message: "変数の型（bit/clock）が見つかりません".to_string(),
+    })?;
+
+    Ok(Decl { name, sig_type })
 }
 
 fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {

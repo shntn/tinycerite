@@ -83,6 +83,15 @@ fn run_parse_phase(source: &str) -> Program {
     prog
 }
 
+/// `SignalType`を`bit`/`bit<N>`/`clock`のテキスト表現にする（Phase 1のダンプ表示用）
+fn format_signal_type(sig_type: &ast::SignalType) -> String {
+    match sig_type {
+        ast::SignalType::Bit(None) => "bit".to_string(),
+        ast::SignalType::Bit(Some(w)) => format!("bit<{w}>"),
+        ast::SignalType::Clock => "clock".to_string(),
+    }
+}
+
 /// Phase 1の結果（モジュール定義・ブロックの内訳）をダンプする
 fn print_parse_result(prog: &Program) {
     println!("  OK: {} module(s), {} block(s)", prog.modules.len(), prog.blocks.len());
@@ -98,8 +107,7 @@ fn print_parse_result(prog: &Program) {
             block.stmts.len()
         );
         for decl in &block.decls {
-            let width_str = decl.width.map(|w| format!("[{w}]")).unwrap_or_default();
-            println!("    decl: {}: bit{}", decl.name, width_str);
+            println!("    decl: {}: {}", decl.name, format_signal_type(&decl.sig_type));
         }
         for inst in &block.instances {
             println!("    inst: {} = {}(...)", inst.instance_name, inst.module_name);

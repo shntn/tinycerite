@@ -1,19 +1,22 @@
 module adder {
-    port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
+    port {
+        clk: input clock;
+        a: input bit<8>;
+        b: input bit<8>;
+        sum: output bit<8>;
+    }
+
     sum <= a + b;
 }
 
 testbench tb {
-    var counter: bit<8>;
-    counter <= counter + 1;
-
-    var clk: bit;
-    clk <= counter & 1;      // クロック分周（既存の&演算子だけで書ける。新しい構文は不要）
+    var clk: clock;
+    clk <= !clk;            // クロック分周
 
     var x: bit<8>;
     var y: bit<8>;
     var z: bit<8>;
-    var u1 = adder(a: x, b: y);
+    var u1 = adder(clk: clk, a: x, b: y);
 
     initial {
         x = 3;

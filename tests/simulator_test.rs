@@ -216,8 +216,9 @@ fn module_instance_output_reflects_computed_value() {
 #[test]
 fn module_instance_with_sequential_output_has_one_cycle_latency() {
     let (mut sim, nodes, signals) = setup(
-        "module adder { port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; } \
-         { var x: bit<8>; var y: bit<8>; x = 3; y = 4; var u1 = adder(a: x, b: y); }",
+        "module adder { port { clk: input clock; a: input bit<8>; b: input bit<8>; sum: output bit<8>; } sum <= a + b; } \
+         testbench tb { var clk: clock; clk <= !clk; var x: bit<8>; var y: bit<8>; x = 3; y = 4; \
+         var u1 = adder(clk: clk, a: x, b: y); }",
     );
     let sum_id = signals.iter().position(|s| s.name == "u1.sum").unwrap();
     let snap0 = sim.step(&nodes);

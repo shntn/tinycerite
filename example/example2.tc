@@ -5,7 +5,7 @@ module adder {
         sum: output bit<8>;
     }
 
-    sum <= a + b;
+    sum = a + b;
 }
 
 {

@@ -23,12 +23,34 @@ pub enum Direction {
     Output,
 }
 
-/// ポート宣言 `name: input/output bit<N>;`
+/// 信号の型（`bit`/`bit<N>`/`clock`）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SignalType {
+    /// `None` = 1-bit（`bit`）、`Some(n)` = nビット（`bit<n>`）
+    Bit(Option<u64>),
+    /// クロック信号。常に1ビット扱いで`<N>`は書けない
+    Clock,
+}
+
+impl SignalType {
+    pub fn width(&self) -> u64 {
+        match self {
+            SignalType::Bit(w) => w.unwrap_or(1),
+            SignalType::Clock => 1,
+        }
+    }
+
+    pub fn is_clock(&self) -> bool {
+        matches!(self, SignalType::Clock)
+    }
+}
+
+/// ポート宣言 `name: input/output bit<N>;` / `name: input/output clock;`
 #[derive(Debug, Clone)]
 pub struct PortDecl {
     pub name: String,
     pub direction: Direction,
-    pub width: Option<u64>,
+    pub sig_type: SignalType,
 }
 
 /// モジュール定義
@@ -78,7 +100,7 @@ pub enum ProcStmt {
 #[derive(Debug, Clone)]
 pub struct Decl {
     pub name: String,
-    pub width: Option<u64>, // None = bit (1-bit), Some(n) = bit[n]
+    pub sig_type: SignalType,
 }
 
 /// 代入文

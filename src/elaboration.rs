@@ -24,6 +24,7 @@ pub struct ResolvedSignal {
     pub name: String,
     pub width: u64,
     pub id: usize,
+    pub is_clock: bool,
 }
 
 /// 解決済みの代入文
@@ -75,6 +76,7 @@ pub struct ResolvedPort {
     pub name: String,
     pub direction: Direction,
     pub signal_id: usize,
+    pub is_clock: bool,
 }
 
 /// 解決済みのモジュールインスタンス
@@ -100,6 +102,8 @@ pub struct ResolvedModuleDef {
     pub name: String,
     pub ports: Vec<ResolvedPort>,
     pub body: ResolvedScope,
+    /// `clock`型の入力ポートのローカル信号ID（`resolve_module_ports`が高々1つに限定して検出する）
+    pub clock_port: Option<usize>,
 }
 
 /// 解決済みの手続き文（`initial { }` 内）
@@ -163,9 +167,18 @@ fn build_module_defs(prog: &Program) -> Result<HashMap<String, ResolvedModuleDef
 /// モジュール定義を解決する: ポートを信号として登録し、本体の代入文を解決したうえで
 /// 通常のスコープと同じ静的チェックを適用する
 fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
-    let (mut signals, mut symtab, ports) = resolve_module_ports(m)?;
+    let (mut signals, mut symtab, ports, clock_port) = resolve_module_ports(m)?;
     resolve_module_decls(m, &mut signals, &mut symtab)?;
     let stmts = resolve_module_stmts(m, &symtab, &ports)?;
+
+    if clock_port.is_none() && stmts.iter().any(|s| matches!(s, ResolvedStmt::Sequential { .. })) {
+        return Err(ElabError {
+            message: format!(
+                "モジュール '{}' は順序代入(reg)を使用していますが、clock型の入力ポートがありません",
+                m.name
+            ),
+        });
+    }
 
     check_multiple_drivers(&stmts, &signals)?;
     check_combinational_loops(&stmts, &signals)?;
@@ -174,14 +187,20 @@ fn resolve_module_def(m: &ModuleDef) -> Result<ResolvedModuleDef> {
         name: m.name.clone(),
         ports,
         body: ResolvedScope { signals, stmts, instances: Vec::new() },
+        clock_port,
     })
 }
 
-/// モジュールのポート宣言を信号として登録する（重複ポート名はエラー）
-fn resolve_module_ports(m: &ModuleDef) -> Result<(Vec<ResolvedSignal>, SymbolTable, Vec<ResolvedPort>)> {
+/// `resolve_module_ports`の戻り値: (信号リスト, シンボルテーブル, ポートリスト, clock入力ポートのローカルID)
+type ModulePortsResolution = (Vec<ResolvedSignal>, SymbolTable, Vec<ResolvedPort>, Option<usize>);
+
+/// モジュールのポート宣言を信号として登録する（重複ポート名はエラー）。
+/// `clock`型ポートは`output`不可、`input`側は高々1つに限定する（いずれもエラー）。
+fn resolve_module_ports(m: &ModuleDef) -> Result<ModulePortsResolution> {
     let mut signals = Vec::new();
     let mut symtab = SymbolTable::new();
     let mut ports = Vec::new();
+    let mut clock_port = None;
 
     for p in &m.ports {
         if symtab.contains_key(&p.name) {
@@ -189,17 +208,34 @@ fn resolve_module_ports(m: &ModuleDef) -> Result<(Vec<ResolvedSignal>, SymbolTab
                 message: format!("モジュール '{}' のポート '{}' が重複しています", m.name, p.name),
             });
         }
+        let is_clock = p.sig_type.is_clock();
+        if is_clock && p.direction == Direction::Output {
+            return Err(ElabError {
+                message: format!("モジュール '{}' の出力ポート '{}' に clock 型は使用できません", m.name, p.name),
+            });
+        }
+
         let id = signals.len();
-        let width = p.width.unwrap_or(1);
+        let width = p.sig_type.width();
         symtab.insert(p.name.clone(), id);
-        signals.push(ResolvedSignal { name: p.name.clone(), width, id });
-        ports.push(ResolvedPort { name: p.name.clone(), direction: p.direction, signal_id: id });
+        signals.push(ResolvedSignal { name: p.name.clone(), width, id, is_clock });
+        ports.push(ResolvedPort { name: p.name.clone(), direction: p.direction, signal_id: id, is_clock });
+
+        if is_clock {
+            if clock_port.is_some() {
+                return Err(ElabError {
+                    message: format!("モジュール '{}' に clock 型の入力ポートが複数あります", m.name),
+                });
+            }
+            clock_port = Some(id);
+        }
     }
 
-    Ok((signals, symtab, ports))
+    Ok((signals, symtab, ports, clock_port))
 }
 
-/// モジュール本体の`var`宣言を、ポートと同じ信号空間に追加登録する（重複宣言はエラー）
+/// モジュール本体の`var`宣言を、ポートと同じ信号空間に追加登録する（重複宣言はエラー）。
+/// `clock`型の`var`宣言はテストベンチ内でのみ許可されるため、モジュール本体では常にエラー。
 fn resolve_module_decls(m: &ModuleDef, signals: &mut Vec<ResolvedSignal>, symtab: &mut SymbolTable) -> Result<()> {
     for decl in &m.decls {
         if symtab.contains_key(&decl.name) {
@@ -207,10 +243,18 @@ fn resolve_module_decls(m: &ModuleDef, signals: &mut Vec<ResolvedSignal>, symtab
                 message: format!("モジュール '{}' 内で変数 '{}' が重複宣言されています", m.name, decl.name),
             });
         }
+        if decl.sig_type.is_clock() {
+            return Err(ElabError {
+                message: format!(
+                    "モジュール '{}' 内で変数 '{}' に clock 型は使用できません（clock型のvar宣言はテストベンチ内でのみ許可されています）",
+                    m.name, decl.name
+                ),
+            });
+        }
         let id = signals.len();
-        let width = decl.width.unwrap_or(1);
+        let width = decl.sig_type.width();
         symtab.insert(decl.name.clone(), id);
-        signals.push(ResolvedSignal { name: decl.name.clone(), width, id });
+        signals.push(ResolvedSignal { name: decl.name.clone(), width, id, is_clock: false });
     }
     Ok(())
 }
@@ -256,7 +300,7 @@ fn elaborate_top(
     modules: &HashMap<String, ResolvedModuleDef>,
 ) -> Result<(ResolvedScope, SymbolTable, InstanceTable)> {
     let (signals, symtab) = build_signals(prog)?;
-    let (instances, instance_table) = build_instances(prog, &symtab, modules)?;
+    let (instances, instance_table) = build_instances(prog, &symtab, &signals, modules)?;
     let stmts = resolve_stmts(prog, &symtab, &instance_table, modules)?;
 
     check_multiple_drivers(&stmts, &signals)?;
@@ -302,35 +346,48 @@ fn build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)> {
     let mut signals = Vec::new();
     let mut symtab = SymbolTable::new();
 
-    let all_decls = prog
-        .blocks
-        .iter()
-        .flat_map(|b| &b.decls)
-        .chain(prog.testbenches.iter().flat_map(|t| &t.decls));
-
-    for decl in all_decls {
-        if symtab.contains_key(&decl.name) {
+    // `block`側の`decl`は`clock`型を許可しない（clock型のvar宣言はテストベンチ内でのみ許可される）
+    for decl in prog.blocks.iter().flat_map(|b| &b.decls) {
+        if decl.sig_type.is_clock() {
             return Err(ElabError {
-                message: format!("変数 '{}' が重複宣言されています", decl.name),
+                message: format!(
+                    "変数 '{}': clock型のvar宣言はテストベンチ内でのみ許可されています",
+                    decl.name
+                ),
             });
         }
-        let id = signals.len();
-        let width = decl.width.unwrap_or(1);
-        symtab.insert(decl.name.clone(), id);
-        signals.push(ResolvedSignal {
-            name: decl.name.clone(),
-            width,
-            id,
-        });
+        push_signal(&mut signals, &mut symtab, decl)?;
+    }
+    for decl in prog.testbenches.iter().flat_map(|t| &t.decls) {
+        push_signal(&mut signals, &mut symtab, decl)?;
     }
 
     Ok((signals, symtab))
+}
+
+/// 1つの`decl`を信号として登録する（重複宣言はエラー）
+fn push_signal(signals: &mut Vec<ResolvedSignal>, symtab: &mut SymbolTable, decl: &Decl) -> Result<()> {
+    if symtab.contains_key(&decl.name) {
+        return Err(ElabError {
+            message: format!("変数 '{}' が重複宣言されています", decl.name),
+        });
+    }
+    let id = signals.len();
+    symtab.insert(decl.name.clone(), id);
+    signals.push(ResolvedSignal {
+        name: decl.name.clone(),
+        width: decl.sig_type.width(),
+        id,
+        is_clock: decl.sig_type.is_clock(),
+    });
+    Ok(())
 }
 
 /// モジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する
 fn build_instances(
     prog: &Program,
     symtab: &SymbolTable,
+    signals: &[ResolvedSignal],
     modules: &HashMap<String, ResolvedModuleDef>,
 ) -> Result<(Vec<ResolvedInstance>, InstanceTable)> {
     let mut instances = Vec::new();
@@ -351,7 +408,7 @@ fn build_instances(
             message: format!("モジュール '{}' が定義されていません", inst.module_name),
         })?;
 
-        let connections = resolve_instance_connections(inst, module_def, symtab, &resolved_so_far, modules)?;
+        let connections = resolve_instance_connections(inst, module_def, symtab, signals, &resolved_so_far, modules)?;
 
         instance_table.insert(inst.instance_name.clone(), inst.module_name.clone());
         resolved_so_far.insert(inst.instance_name.clone(), inst.module_name.clone());
@@ -376,11 +433,13 @@ fn check_instance_name_available(name: &str, symtab: &SymbolTable, instance_tabl
 }
 
 /// 1つのインスタンス化の引数（名前付き接続式）を、対象モジュールの入力ポート定義と
-/// 突き合わせて解決する。出力ポート指定・未知のポート名・引数の重複・未接続の入力ポートはエラー
+/// 突き合わせて解決する。出力ポート指定・未知のポート名・引数の重複・未接続の入力ポート・
+/// clock型ポートの型不一致はエラー
 fn resolve_instance_connections(
     inst: &InstDecl,
     module_def: &ResolvedModuleDef,
     symtab: &SymbolTable,
+    signals: &[ResolvedSignal],
     resolved_so_far: &InstanceTable,
     modules: &HashMap<String, ResolvedModuleDef>,
 ) -> Result<HashMap<String, ResolvedExpr>> {
@@ -389,8 +448,8 @@ fn resolve_instance_connections(
 
     let mut connections = HashMap::new();
     for (arg_name, arg_expr) in &inst.args {
-        let is_input_port = input_ports.iter().any(|p| &p.name == arg_name);
-        if !is_input_port {
+        let port = input_ports.iter().find(|p| &p.name == arg_name);
+        let Some(port) = port else {
             let is_output_port = module_def.ports.iter().any(|p| &p.name == arg_name && p.direction == Direction::Output);
             let message = if is_output_port {
                 format!(
@@ -401,13 +460,30 @@ fn resolve_instance_connections(
                 format!("モジュール '{}' に入力ポート '{}' はありません", inst.module_name, arg_name)
             };
             return Err(ElabError { message });
-        }
+        };
         if connections.contains_key(arg_name) {
             return Err(ElabError {
                 message: format!("引数 '{}' が重複しています", arg_name),
             });
         }
         let resolved_expr = resolve_expr(arg_expr, symtab, resolved_so_far, modules)?;
+
+        let source_is_clock = resolved_expr_is_clock(&resolved_expr, signals);
+        if port.is_clock != source_is_clock {
+            let message = if port.is_clock {
+                format!(
+                    "モジュール '{}' の clock 型ポート '{}' には clock 型の信号のみ接続できます",
+                    inst.module_name, arg_name
+                )
+            } else {
+                format!(
+                    "引数 '{}' に接続された信号は clock 型です。clock 型でないポート '{}' には接続できません",
+                    arg_name, arg_name
+                )
+            };
+            return Err(ElabError { message });
+        }
+
         connections.insert(arg_name.clone(), resolved_expr);
     }
 
@@ -423,6 +499,13 @@ fn resolve_instance_connections(
     }
 
     Ok(connections)
+}
+
+/// 解決済み式が「clock型の信号への直接参照」かどうかを判定する。
+/// `clock`型は`Ident`（直接参照）でしか表れ得ない（出力ポートに`clock`型は使えないため
+/// `InstanceField`がclock型になることはなく、演算結果も常にclock型ではない）。
+fn resolved_expr_is_clock(expr: &ResolvedExpr, signals: &[ResolvedSignal]) -> bool {
+    matches!(expr, ResolvedExpr::Ident(id) if signals[*id].is_clock)
 }
 
 /// 代入文を走査し、変数名をシンボルIDに解決する（未宣言変数はエラー）

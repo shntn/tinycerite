@@ -43,7 +43,8 @@ cycle  a  b
 program       = (module_def | testbench_def | block)+
 module_def    = "module" ident "{" port_block (decl | stmt)* "}"
 port_block    = "port" "{" port_decl* "}"
-port_decl     = ident ":" ("input" | "output") "bit" ("<" number ">")? ";"
+port_decl     = ident ":" ("input" | "output") signal_type ";"
+signal_type   = "clock" | ("bit" ("<" number ">")?)
 
 testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
 initial_block = "initial" "{" (proc_assign | proc_step)* "}"
@@ -51,7 +52,7 @@ proc_assign   = ident "=" ternary_expr ";"
 proc_step     = "step" ";"
 
 block       = "{" (decl | inst_decl | stmt)* "}"
-decl        = "var" ident ":" "bit" ("<" number ">")? ";"
+decl        = "var" ident ":" signal_type ";"
 inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
 named_arg   = ident ":" ternary_expr
 
@@ -66,6 +67,7 @@ field_access= ident "." ident   # instance.output_port
 
 - `var x: bit` — 1ビット信号を宣言（初期値 0）
 - `var x: bit<N>` — Nビット信号を宣言
+- `var x: clock` — クロック型の信号を宣言（常に1ビット、`<N>`は書けない）。**テストベンチ内でのみ**宣言できる（`block`・モジュール本体では宣言不可）。詳細は「クロック」節を参照
 - `N'b...` `N'o...` `N'd...` `N'h...` — ビットベクタリテラル。幅`N`と基数（`b`=2進 `o`=8進 `d`=10進 `h`=16進）を明示する（例: `4'b1010`、`8'hFF`）。宣言幅に収まらない桁は代入と同様に幅へ切り詰められる（エラーにはならない）
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、終了時に一斉反映）
@@ -85,7 +87,7 @@ module adder {
         sum: output bit<8>;
     }
 
-    sum <= a + b;
+    sum = a + b;
 }
 
 {
@@ -99,18 +101,44 @@ module adder {
 ```
 
 - `module name { port { ... } ... }` — モジュール定義。`port { }` ブロックの直後に内部の`var`宣言・代入文を書く
-- ポート宣言 `name: input/output bit<N>;` — モジュールの入出力信号。`input`ポートへの内部代入はエラー
+- ポート宣言 `name: input/output bit<N>;` / `name: input clock;` — モジュールの入出力信号。`input`ポートへの内部代入はエラー。クロックポートについては「クロック」節を参照
 - インスタンス化 `var inst = module_name(port: expr, ...);` — `input`ポートだけを名前付き引数で接続する（構造体リテラルではなく関数呼び出し風の構文）
 - 出力の読み出し `inst.output_port` — 通常の式の中でそのまま使える（例: `z = inst.sum + 1;`）
 - モジュール定義は宣言された時点で（インスタンス化の有無によらず）1回だけ検証される
 - モジュールが別のモジュールをインスタンス化すること（ネスト）は現状未対応
 - 既知の制限: あるインスタンスの出力を同じインスタンスの入力に戻すような、インスタンス境界をまたぐ組合せループはエラボレーション時点では検出できない（`InstanceField`読み出しは依存グラフ上では葉として扱われるため）。実際にそのような回路を書いた場合、シミュレーション実行時のΔ-サイクル上限（`MAX_COMB_ITERATIONS`）でパニックとして検出される
 
+### クロック
+
+```
+module adder {
+    port { clk: input clock; a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
+    sum <= a + b;   // 順序代入(reg) → clk型ポートが無いとエラボレーションエラー
+}
+
+testbench tb {
+    var clk: clock;      // clock型のvar宣言はテストベンチ内でのみ許可
+    clk <= !clk;
+
+    var x: bit<8>;
+    var y: bit<8>;
+    var u1 = adder(clk: clk, a: x, b: y);   // clock型ポートにはclock型の信号しか接続できない
+}
+```
+
+- `clk: input clock;` — モジュールのポートを`clock`型として宣言する。`output`に`clock`は使えない（エラー）
+- `var clk: clock;` — クロック信号の宣言。**テストベンチ内でのみ**許可される（`block`・モジュール本体で書くとエラー）。値の生成方法は普通の代入文のまま（`clk <= !clk;`で毎ステップ反転させるか、カウンタと`&`を組み合わせて分周する。1回の`step`/1サイクルが最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
+- モジュール内で順序代入（`<=`、reg相当）を1つでも使う場合、そのモジュールに`clock`型の入力ポートが必須（無いとエラボレーションエラー）
+- モジュールに`clock`型の入力ポートは高々1つ（2つ以上あるとエラー）
+- インスタンス化時、`clock`型ポートには`clock`型の信号だけを接続できる（逆に`clock`型の信号を`bit`型ポートに接続するのもエラー）。型検査は接続部分のみで、通常の代入文の右辺の型までは検査しない
+- regの`clock`はモジュールの`clock`入力ポートに紐付く。モジュールの外（トップレベル/テストベンチ直下）の順序代入はモジュールに属さないため、この制約もクロックへの紐付けも対象外（例えば`counter <= counter + 1;`はモジュール外なのでそのまま書ける）
+- 現状トリガーの向きはposedge固定（暫定処置。negedge/両エッジのサポートは未実装）。また、実際にレジスタがクロックのエッジでのみ更新されるという評価モデルの変更自体はまだ実装しておらず、今回追加したのはクロックの紐付けの静的チェックのみ
+
 ### テストベンチ
 
 ```
 module adder {
-    port { a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
+    port { clk: input clock; a: input bit<8>; b: input bit<8>; sum: output bit<8>; }
     sum <= a + b;
 }
 
@@ -118,13 +146,13 @@ testbench tb {
     var counter: bit<8>;
     counter <= counter + 1;
 
-    var clk: bit;
+    var clk: clock;
     clk <= counter & 1;      // クロック分周（既存の&演算子だけで書ける。新しい構文は不要）
 
     var x: bit<8>;
     var y: bit<8>;
     var z: bit<8>;
-    var u1 = adder(a: x, b: y);
+    var u1 = adder(clk: clk, a: x, b: y);
 
     initial {
         x = 3;
@@ -152,6 +180,7 @@ testbench tb {
 - インスタンス境界をまたぐ組合せループの検出はエラボレーション時点では未対応（シミュレーション実行時には検出される。上記参照）
 - `initial`内に`assert`のような検証構文は無い
 - シミュレーションはパニックによる停止のみ（VCDダンプ未対応）
+- regの`clock`トリガーはposedge固定（暫定処置。negedge/両エッジは未対応）。また、regがクロックのエッジでのみ更新されるという評価モデル自体は未実装（クロックへの紐付けの静的チェックのみ実装済み）
 
 ## アーキテクチャ
 
