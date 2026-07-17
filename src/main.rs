@@ -79,6 +79,12 @@ fn run_parse_phase(source: &str) -> Program {
         std::process::exit(1);
     });
 
+    print_parse_result(&prog);
+    prog
+}
+
+/// Phase 1の結果（モジュール定義・ブロックの内訳）をダンプする
+fn print_parse_result(prog: &Program) {
     println!("  OK: {} module(s), {} block(s)", prog.modules.len(), prog.blocks.len());
     for m in &prog.modules {
         println!("  Module {}: {} port(s), {} decl(s), {} stmt(s)", m.name, m.ports.len(), m.decls.len(), m.stmts.len());
@@ -109,7 +115,6 @@ fn run_parse_phase(source: &str) -> Program {
             }
         }
     }
-    prog
 }
 
 /// Phase 2: エラボレーションし、結果をダンプする（失敗時は即終了）
@@ -120,20 +125,30 @@ fn run_elaboration_phase(prog: &Program) -> Elaborated {
         std::process::exit(1);
     });
 
+    print_elaboration_result(&elab);
+    elab
+}
+
+/// Phase 2の結果（モジュール数・信号一覧）をダンプする
+fn print_elaboration_result(elab: &Elaborated) {
     println!("  OK: {} module(s), {} signal(s), {} stmt(s)", elab.modules.len(), elab.top.signals.len(), elab.top.stmts.len());
     for sig in &elab.top.signals {
         println!("  signal {}: {} ({} bit)", sig.id, sig.name, sig.width);
     }
-    elab
 }
 
 /// Phase 3: ネットリストを構築し、テキスト表示する
 fn run_netlist_phase(elab: &Elaborated) -> Netlist {
     println!("\n--- Phase 3: Netlist Build ---");
     let nl = netlist::build_netlist(elab);
-    println!();
-    println!("{}", netlist::format_netlist(&nl));
+    print_netlist_result(&nl);
     nl
+}
+
+/// Phase 3の結果（ネットリストのテキスト表現）をダンプする
+fn print_netlist_result(nl: &Netlist) {
+    println!();
+    println!("{}", netlist::format_netlist(nl));
 }
 
 /// Phase 4: テストベンチの`initial`があればその手続きに従って実行し、
@@ -141,24 +156,27 @@ fn run_netlist_phase(elab: &Elaborated) -> Netlist {
 /// どちらの場合も結果は波形として表示する。
 fn run_simulation_phase(nl: &Netlist, cycles: Option<u64>) {
     if !nl.initial.is_empty() {
-        run_initial_sequence(nl);
+        let snaps = run_initial_sequence(nl);
+        print_simulation_result("Testbench (initial)", &snaps, nl);
         return;
     }
 
     let Some(n) = cycles else { return };
 
-    println!("--- Phase 4: Simulation ({n} cycles) ---\n");
     let mut sim = simulator::Simulator::new(nl.signals.len());
-    if n > 0 {
-        let snaps = sim.run(&nl.nodes, n);
-        print!("{}", simulator::format_waveform(&snaps, &nl.signals));
-    }
+    let snaps = if n > 0 { sim.run(&nl.nodes, n) } else { Vec::new() };
+    print_simulation_result(&format!("Simulation ({n} cycles)"), &snaps, nl);
+}
+
+/// Phase 4の結果（波形）を表示する
+fn print_simulation_result(phase_label: &str, snaps: &[simulator::CycleSnapshot], nl: &Netlist) {
+    println!("--- Phase 4: {phase_label} ---\n");
+    print!("{}", simulator::format_waveform(snaps, &nl.signals));
 }
 
 /// テストベンチの`initial`手続きを実行する: `Assign`はその場で値を設定し、
 /// `Step`は1サイクル進めてスナップショットを記録する。
-fn run_initial_sequence(nl: &Netlist) {
-    println!("--- Phase 4: Testbench (initial) ---\n");
+fn run_initial_sequence(nl: &Netlist) -> Vec<simulator::CycleSnapshot> {
     let mut sim = simulator::Simulator::new(nl.signals.len());
     let mut snaps = Vec::new();
 
@@ -175,5 +193,5 @@ fn run_initial_sequence(nl: &Netlist) {
         }
     }
 
-    print!("{}", simulator::format_waveform(&snaps, &nl.signals));
+    snaps
 }

@@ -1101,8 +1101,11 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 
 ## Phase 4 の実行モード（`main.rs::run_simulation_phase`）
 
-- `nl.initial`が空でなければ`run_initial_sequence(nl)`を呼ぶ: `Simulator::new`で初期化し、`nl.initial`を順に処理する。`InitialStep::Assign { target, expr_node }`は`eval_and_mask`で値を求めて`Simulator::set_signal`、`InitialStep::Step`は`Simulator::step`を呼びスナップショットを記録する。最後に記録したスナップショット列を`format_waveform`で表示する。
-- `nl.initial`が空なら、従来通り`--cycles`（`Some(n)`）が指定されていれば`Simulator::run`でNサイクル実行して波形表示。指定が無ければ何もしない（Phase 3までのネットリスト表示で終わる）。
+`main.rs`の4つのフェーズ関数（`run_parse_phase`/`run_elaboration_phase`/`run_netlist_phase`/`run_simulation_phase`）はいずれも「処理を実行する」と「結果を表示する」を分離しており、各フェーズの表示部分は対応する`print_*`関数（`print_parse_result`/`print_elaboration_result`/`print_netlist_result`/`print_simulation_result`）に切り出されている。Phase 4はさらに、実行そのものが分岐する（`initial`の有無）ため以下のようになっている:
+
+- `nl.initial`が空でなければ`run_initial_sequence(nl) -> Vec<CycleSnapshot>`を呼ぶ（表示は一切行わない、純粋にスナップショット列を返すだけの関数）: `Simulator::new`で初期化し、`nl.initial`を順に処理する。`InitialStep::Assign { target, expr_node }`は`eval_and_mask`で値を求めて`Simulator::set_signal`、`InitialStep::Step`は`Simulator::step`を呼びスナップショットを記録する。得られたスナップショット列は`print_simulation_result("Testbench (initial)", &snaps, nl)`に渡して表示する。
+- `nl.initial`が空なら、従来通り`--cycles`（`Some(n)`）が指定されていれば`Simulator::run`でNサイクル実行してスナップショット列を得て`print_simulation_result(&format!("Simulation ({n} cycles)"), &snaps, nl)`で表示する。指定が無ければ何もしない（Phase 3までのネットリスト表示で終わる）。
+- `print_simulation_result(phase_label, snaps, nl)`はフェーズ見出し（`--- Phase 4: {phase_label} ---`）を表示したあと`format_waveform`で波形を表示する。フェーズラベルを引数化することで、`initial`実行と`--cycles`実行の見出し文言の違い（`Testbench (initial)` / `Simulation (N cycles)`）を1つの表示関数で吸収している。
 
 ---
 
