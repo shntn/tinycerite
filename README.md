@@ -28,7 +28,7 @@ cycle  a  b
 ### サンプル
 
 ```
-{
+testbench tb {
     var a: bit;
     var b: bit;
 
@@ -40,7 +40,7 @@ cycle  a  b
 ### 文法
 
 ```
-program       = (module_def | testbench_def | block)+
+program       = (module_def | testbench_def)+
 module_def    = "module" ident "{" port_block (decl | stmt)* "}"
 port_block    = "port" "{" port_decl* "}"
 port_decl     = ident ":" ("input" | "output") signal_type ";"
@@ -51,7 +51,6 @@ initial_block = "initial" "{" (proc_assign | proc_step)* "}"
 proc_assign   = ident "=" ternary_expr ";"
 proc_step     = "step" ";"
 
-block       = "{" (decl | inst_decl | stmt)* "}"
 decl        = "var" ident ":" signal_type ";"
 inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
 named_arg   = ident ":" ternary_expr
@@ -67,7 +66,7 @@ field_access= ident "." ident   # instance.output_port
 
 - `var x: bit` — 1ビット信号を宣言（初期値 0）
 - `var x: bit<N>` — Nビット信号を宣言
-- `var x: clock` — クロック型の信号を宣言（常に1ビット、`<N>`は書けない）。**テストベンチ内でのみ**宣言できる（`block`・モジュール本体では宣言不可）。詳細は「クロック」節を参照
+- `var x: clock` — クロック型の信号を宣言（常に1ビット、`<N>`は書けない）。**テストベンチ内でのみ**宣言できる（モジュール本体では宣言不可）。詳細は「クロック」節を参照
 - `N'b...` `N'o...` `N'd...` `N'h...` — ビットベクタリテラル。幅`N`と基数（`b`=2進 `o`=8進 `d`=10進 `h`=16進）を明示する（例: `4'b1010`、`8'hFF`）。宣言幅に収まらない桁は代入と同様に幅へ切り詰められる（エラーにはならない）
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、終了時に一斉反映）
@@ -90,7 +89,7 @@ module adder {
     sum = a + b;
 }
 
-{
+testbench tb {
     var x: bit<8>;
     var y: bit<8>;
     var z: bit<8>;
@@ -127,7 +126,7 @@ testbench tb {
 ```
 
 - `clk: input clock;` — モジュールのポートを`clock`型として宣言する。`output`に`clock`は使えない（エラー）
-- `var clk: clock;` — クロック信号の宣言。**テストベンチ内でのみ**許可される（`block`・モジュール本体で書くとエラー）。値の生成方法は普通の代入文のまま（`clk <= !clk;`で毎ステップ反転させるか、カウンタと`&`を組み合わせて分周する。1回の`step`/1サイクルが最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
+- `var clk: clock;` — クロック信号の宣言。**テストベンチ内でのみ**許可される（モジュール本体で書くとエラー）。値の生成方法は普通の代入文のまま（`clk <= !clk;`で毎ステップ反転させるか、カウンタと`&`を組み合わせて分周する。1回の`step`/1サイクルが最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
 - モジュール内で順序代入（`<=`、reg相当）を1つでも使う場合、そのモジュールに`clock`型の入力ポートが必須（無いとエラボレーションエラー）
 - モジュールに`clock`型の入力ポートは高々1つ（2つ以上あるとエラー）
 - インスタンス化時、`clock`型ポートには`clock`型の信号だけを接続できる（逆に`clock`型の信号を`bit`型ポートに接続するのもエラー）。型検査は接続部分のみで、通常の代入文の右辺の型までは検査しない
@@ -166,7 +165,7 @@ testbench tb {
 
 `testbench name { ... }` はプログラム中に高々1つ書ける、`module`と対になるトップレベル構文。中身は2つの部分からなる:
 
-- **並行部分**（`decl`/`inst_decl`/`stmt`、`initial`より前）— 今までの`block`と全く同じ意味論（常時並行に動く回路の接続）。クロック信号もここで普通の代入文として作る（`clk <= !clk;`のようにサイクルごとにトグルさせるか、`counter`と`&`を組み合わせて分周する。1回の`step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
+- **並行部分**（`decl`/`inst_decl`/`stmt`、`initial`より前）— 常時並行に動く回路の接続（`module`本体の代入文と同じ意味論）。クロック信号もここで普通の代入文として作る（`clk <= !clk;`のようにサイクルごとにトグルさせるか、`counter`と`&`を組み合わせて分周する。1回の`step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる）
 - **`initial { }`（手続き部分、省略可）** — 上から順に実行される。`target = expr;`（`proc_assign`）はその瞬間に一度だけ値を設定する（継続的な駆動ではない。`Simulator::set_signal`相当）。`step;`は明示的にシミュレーションを1サイクル進める（`Simulator::step`相当）
 
 `testbench`に`initial`がある場合、CLIの`--cycles`は無視され、`initial`の手続きに従って実行される（`step;`の回数だけサイクルが進む）。`initial`が無ければ（並行部分だけのテストベンチ、または`testbench`自体が無い場合）今まで通り`--cycles N`でNサイクル実行する。

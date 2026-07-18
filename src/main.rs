@@ -60,7 +60,7 @@ fn load_source(file: Option<&str>) -> String {
             eprintln!("エラー: ファイル '{path}' を開けません: {e}");
             std::process::exit(1);
         }),
-        None => r#"{
+        None => r#"testbench sample {
     var     a: bit;
     var     b: bit;
 
@@ -92,27 +92,28 @@ fn format_signal_type(sig_type: &ast::SignalType) -> String {
     }
 }
 
-/// Phase 1の結果（モジュール定義・ブロックの内訳）をダンプする
+/// Phase 1の結果（モジュール定義・テストベンチの内訳）をダンプする
 fn print_parse_result(prog: &Program) {
-    println!("  OK: {} module(s), {} block(s)", prog.modules.len(), prog.blocks.len());
+    println!("  OK: {} module(s), {} testbench(es)", prog.modules.len(), prog.testbenches.len());
     for m in &prog.modules {
         println!("  Module {}: {} port(s), {} decl(s), {} stmt(s)", m.name, m.ports.len(), m.decls.len(), m.stmts.len());
     }
-    for (i, block) in prog.blocks.iter().enumerate() {
+    for tb in &prog.testbenches {
         println!(
-            "  Block {}: {} decl(s), {} instance(s), {} stmt(s)",
-            i,
-            block.decls.len(),
-            block.instances.len(),
-            block.stmts.len()
+            "  Testbench {}: {} decl(s), {} instance(s), {} stmt(s), {} initial stmt(s)",
+            tb.name,
+            tb.decls.len(),
+            tb.instances.len(),
+            tb.stmts.len(),
+            tb.initial.len()
         );
-        for decl in &block.decls {
+        for decl in &tb.decls {
             println!("    decl: {}: {}", decl.name, format_signal_type(&decl.sig_type));
         }
-        for inst in &block.instances {
+        for inst in &tb.instances {
             println!("    inst: {} = {}(...)", inst.instance_name, inst.module_name);
         }
-        for stmt in &block.stmts {
+        for stmt in &tb.stmts {
             match stmt {
                 ast::Stmt::Combinational { target, expr } => {
                     println!("    comb: {target} = {expr:?}");

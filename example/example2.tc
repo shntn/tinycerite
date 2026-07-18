@@ -8,7 +8,7 @@ module adder {
     sum = a + b;
 }
 
-{
+testbench tb {
     var x: bit<8>;
     var y: bit<8>;
     var z: bit<8>;

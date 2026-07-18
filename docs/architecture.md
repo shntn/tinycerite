@@ -22,7 +22,7 @@ Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
 ## 文法 (EBNF)
 
 ```
-program     = (module_def | testbench_def | block)+
+program     = (module_def | testbench_def)+
 
 # モジュール定義
 module_def  = "module" ident "{" port_block (decl | stmt)* "}"
@@ -30,15 +30,14 @@ port_block  = "port" "{" port_decl* "}"
 port_decl   = ident ":" ("input" | "output") signal_type ";"
 signal_type = "clock" | ("bit" ("<" number ">")?)
 
-# テストベンチ定義（プログラム中に高々1つ）
+# テストベンチ定義（プログラム中に高々1つ。トップレベルの信号空間はここでのみ構築される）
 testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
 initial_block = "initial" "{" (proc_assign | proc_step)* "}"
 proc_assign   = ident "=" ternary_expr ";"
 proc_step     = "step" ";"
 
-block       = "{" (decl | inst_decl | stmt)* "}"
 decl        = "var" ident ":" signal_type ";"
-# モジュールインスタンス化（トップレベルのブロック内のみ。モジュール本体はネスト不可）
+# モジュールインスタンス化（testbench_def内のみ。モジュール本体はネスト不可）
 inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
 named_arg   = ident ":" ternary_expr
 
@@ -71,7 +70,7 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 
 - `var x: bit` — 1ビットの信号 x を宣言（初期値 0）
 - `var x: bit<N>` — Nビットの信号 x を宣言
-- `var x: clock` — クロック型の信号 x を宣言（常に1ビット、`<N>`は書けない）。**テストベンチ内でのみ**許可される（`block`・モジュール本体で書くとエラー）。詳細は「クロック」節を参照
+- `var x: clock` — クロック型の信号 x を宣言（常に1ビット、`<N>`は書けない）。**テストベンチ内でのみ**許可される（モジュール本体で書くとエラー）。詳細は「クロック」節を参照
 - `N'b...` `N'o...` `N'd...` `N'h...` — ビットベクタリテラル。幅 `N` と基数（`b`=2進、`o`=8進、`d`=10進、`h`=16進、大小文字どちらの16進桁も可）を明示する（例: `4'b1010`、`8'hFF`）。桁が宣言した幅に収まらない場合（例: `4'b11111`）はエラーにせず、代入と同様に幅へ切り詰める。基数に合わない桁（例: `2'b19`）はパースエラー
 - `a = expr;` — 組み合わせ代入（即時反映）
 - `a <= expr;` — 順序代入（サイクル開始時の値で評価、サイクル終了時に一斉反映）
@@ -80,7 +79,7 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
   - モジュール内で順序代入（reg相当）を1つでも使う場合、そのモジュールに`clock`型の入力ポートが必須（無いとエラー）。`clock`型の入力ポートは高々1つ（2つ以上はエラー）。`output`に`clock`型は使えない（エラー）。詳細は「クロック」節を参照
 - `var 名前 = モジュール名(ポート名: 式, ...);` — モジュールインスタンス化。`input` ポートだけを名前付き引数として接続する（構造体リテラルではなく関数呼び出し風の構文）。全`input`ポート分の接続が必須で、過不足・`output`ポートの指定はエラー。`clock`型ポートへの接続には`clock`型の信号のみ許可される（逆に`clock`型の信号を`bit`型ポートに繋ぐのもエラー）
 - `インスタンス名.出力ポート名` — インスタンスの出力を式の中で読み出す（例: `z = u1.sum + 1;`）。`input`ポートを外部から読み出そうとするとエラー
-- `testbench name { (decl | inst_decl | stmt)* initial_block? }` — テストベンチ定義。プログラム中に高々1つ（2つ以上あるとエラー）。`initial`より前の並行部分（`decl`/`inst_decl`/`stmt`）は`block`と全く同じ意味論で、トップレベルの信号空間（`block`群と共有）に合流する。クロック信号もここで普通の代入文として作る（例: `clk <= !clk;`で毎サイクルトグル、`clk <= counter & 1;`で分周。1回の`Simulator::step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる。`clock`型として宣言するかどうかは任意だが、モジュールの`clock`型ポートに接続するには`clock`型として宣言されている必要がある）
+- `testbench name { (decl | inst_decl | stmt)* initial_block? }` — テストベンチ定義。プログラム中に高々1つ（2つ以上あるとエラー）。トップレベルの信号空間はここでのみ構築される（`decl`/`inst_decl`/`stmt`以外の場所に信号を宣言する手段は無い）。クロック信号もここで普通の代入文として作る（例: `clk <= !clk;`で毎サイクルトグル、`clk <= counter & 1;`で分周。1回の`Simulator::step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる。`clock`型として宣言するかどうかは任意だが、モジュールの`clock`型ポートに接続するには`clock`型として宣言されている必要がある）
 - `initial { (proc_assign | proc_step)* }` — テストベンチ内の手続き部分（省略可）。並行部分とは異なる意味論を持つ: 上から順に、1文ずつ実行される
   - `proc_assign`（`target = expr;`）— その瞬間に一度だけ`target`に値を設定する（継続的な駆動ではない。`Simulator::set_signal`相当）
   - `proc_step`（`step;`）— シミュレーションを明示的に1サイクル進める（`Simulator::step`相当）
@@ -100,7 +99,7 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
 ## サンプル
 
 ```
-{
+testbench tb {
     var a: bit;
     var b: bit;
 
@@ -124,7 +123,7 @@ module adder {
     sum = a + b;
 }
 
-{
+testbench tb {
     var x: bit<8>;
     var y: bit<8>;
     var z: bit<8>;
@@ -136,7 +135,7 @@ module adder {
 
 現状の制限:
 
-- モジュールが別のモジュールをインスタンス化すること（ネスト）は未対応（文法上、`inst_decl` はトップレベルの `block` にのみ許可されている）
+- モジュールが別のモジュールをインスタンス化すること（ネスト）は未対応（文法上、`inst_decl` は `testbench_def` の中にのみ許可されている）
 - インスタンス境界をまたぐ組合せループ（あるインスタンスの出力を同じインスタンスの入力に戻すような配線）はエラボレーション時点では検出できない。詳細は後述の `elaboration` モジュール節を参照
 
 ## クロックの例
@@ -227,19 +226,10 @@ testbench tb {
 
 `Program` :
 
-- 役割: パース結果のトップレベル。0個以上の Block・モジュール定義・テストベンチ定義を持つ。
+- 役割: パース結果のトップレベル。0個以上のモジュール定義・テストベンチ定義を持つ。
 - フィールド:
-  - `blocks: Vec<Block>` — プログラム中のブロックのリスト
   - `modules: Vec<ModuleDef>` — プログラム中のモジュール定義のリスト
   - `testbenches: Vec<TestbenchDef>` — プログラム中のテストベンチ定義のリスト（文法上は複数書けるが、高々1つという制約はエラボレーションで検証する）
-
-`Block` :
-
-- 役割: `{ ... }` で囲まれた1つのスコープ。宣言・モジュールインスタンス化・代入文の列。
-- フィールド:
-  - `decls: Vec<Decl>` — 変数宣言のリスト
-  - `instances: Vec<InstDecl>` — モジュールインスタンス化のリスト
-  - `stmts: Vec<Stmt>` — 代入文のリスト
 
 `Decl` :
 
@@ -295,7 +285,7 @@ testbench tb {
   - `name: String` — テストベンチ名
   - `decls: Vec<Decl>` — 並行部分の変数宣言のリスト
   - `instances: Vec<InstDecl>` — 並行部分のモジュールインスタンス化のリスト
-  - `stmts: Vec<Stmt>` — 並行部分の代入文のリスト（`Block`と同じ意味論でトップレベルの信号空間に合流する）
+  - `stmts: Vec<Stmt>` — 並行部分の代入文のリスト（トップレベルの信号空間はここでのみ構築される）
   - `initial: Vec<ProcStmt>` — 手続き部分（`initial { }`）の文のリスト。`decls`/`instances`/`stmts`とは異なる意味論を持つ
 
 `ProcStmt` (enum) :
@@ -389,12 +379,7 @@ testbench tb {
 - 概要: 入力文字列をパースし、`Program` を返す。
 - 処理:
   1. `CeriteParser::parse(Rule::program, input)` を呼び、pest の `Pairs` を得る
-  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::block` → `parse_block()`、`Rule::module_def` → `parse_module_def()`、`Rule::testbench_def` → `parse_testbench_def()` に振り分けて `Program` を構築
-
-`parse_block(pair: Pair<Rule>) -> Result<Block>` :
-
-- 概要: `block` ルールのペアから `Block` を構築。
-- 処理: 子ペアを走査し、`Rule::decl` → `parse_decl()`、`Rule::inst_decl` → `parse_inst_decl()`、`Rule::stmt` → `parse_stmt()` に振り分け。
+  2. `Pairs` を走査し、`Rule::program` の子ペアから `Rule::module_def` → `parse_module_def()`、`Rule::testbench_def` → `parse_testbench_def()` に振り分けて `Program` を構築
 
 `parse_module_def(pair: Pair<Rule>) -> Result<ModuleDef>` :
 
@@ -513,7 +498,7 @@ testbench tb {
 - 内容:
 
 ```pest
-program = { SOI ~ (module_def | testbench_def | block)+ ~ EOI }
+program = { SOI ~ (module_def | testbench_def)+ ~ EOI }
 
 module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
 port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
@@ -526,7 +511,6 @@ initial_block = { "initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}" }
 proc_assign   = { ident ~ "=" ~ ternary_expr ~ ";" }
 proc_step     = { "step" ~ ";" }
 
-block     = { "{" ~ (decl | inst_decl | stmt)* ~ "}" }
 decl      = { "var" ~ ident ~ ":" ~ signal_type ~ ";" }
 inst_decl = { "var" ~ ident ~ "=" ~ ident ~ "(" ~ (named_arg ~ ("," ~ named_arg)*)? ~ ")" ~ ";" }
 named_arg = { ident ~ ":" ~ ternary_expr }
@@ -580,7 +564,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - `signal_type` は `port_decl`/`decl`で共用する。`reg`/`wire`のような宣言キーワードは無く、あくまで`bit`/`bit<N>`/`clock`という値の型のみを表す。`reg`相当（レジスタ）かどうかは代入演算子（`=`/`<=`）から`netlist`が自動的に決定する（後述）。`clock`型を`var`宣言できるのはテストベンチ内のみ・`output`ポートには使えない、という制約は文法ではなく`elaboration`で検証する。
 - `expression_factor` では `bitvec_literal` を `number` より先に置いている。`4'b1010` の `4` の部分だけで `number` にマッチしてしまうと、続く `'b1010` が余ってパース全体が失敗する。PEGの順序付き選択では `bitvec_literal` を先に試し、`'` が続かない入力（例えば単なる `42`）では自動的にバックトラックして `number` にフォールバックする。
 - 同様に `field_access`（`ident ~ "." ~ ident`）も `expression_factor` の中で単独の `ident` より先に置いている。`u1.sum` の `u1` だけで `ident` にマッチしてしまうと `.sum` が余ってパースが壊れるため、`field_access` を先に試し、`.` が続かない入力では `ident` にバックトラックする。
-- `inst_decl`（モジュールインスタンス化）は `block` の中にのみあり、`module_def` の本体（`(decl | stmt)*`）には含まれていない。これにより「モジュールが別のモジュールをインスタンス化する」というネストが文法レベルで禁止されている（現状の制限。将来ネストに対応する場合はここを緩める）。
+- `inst_decl`（モジュールインスタンス化）は `testbench_def` の中にのみあり、`module_def` の本体（`(decl | stmt)*`）には含まれていない。これにより「モジュールが別のモジュールをインスタンス化する」というネストが文法レベルで禁止されている（現状の制限。将来ネストに対応する場合はここを緩める）。
 - `testbench_def` の `(decl | inst_decl | stmt)*` の直後に `initial_block?` を続けている。`initial` はキーワードなので `stmt`（`ident ~ (assign | nonblock) ~ ...`）が「initial」を識別子として食おうとしても、続く `{` が `assign`/`nonblock`（`=`/`<=`）にマッチせず `stmt` の試行は失敗し、`decl`/`inst_decl` も `"initial"` では始まらないため `(decl | inst_decl | stmt)*` はそこで自然に止まり、`initial_block` の解析に移る。
 - `program` は `SOI ~ ... ~ EOI` で入力全体の消費を明示的に要求している。pestの`Parser::parse()`は、指定したルールが入力の**先頭部分**にさえ一致すれば成功を返し、末尾に残った未消費の入力があってもエラーにしない（`EOI`を明示しない限り）。これを`SOI`/`EOI`無しのまま放置すると、例えば`//`コメントのようにこの文法がサポートしていない構文が入力の途中に現れた場合、そこで静かにパースを打ち切り、それ以降の内容（コメントの後に続くはずのブロック全体など）を**エラーも警告も無く**捨ててしまう（実際にこの不備が原因で、コメント付きのソースの後半ブロックが丸ごと無視されるバグが起きたことがある）。`EOI`まで明示的に要求することで、こうした未消費の残りは即座にパースエラーになる。
 - `COMMENT`（`"//" ~ (!"\n" ~ ANY)*`）は行コメントを定義する silent ルール。`WHITESPACE`と同様、`COMMENT`という名前の非atomicルールは暗黙的に他のルールのトークン間（`~`の間）に挿入されるため、個々のルールで明示的にコメントを許可する記述は不要。
@@ -706,7 +690,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - 処理:
   1. `prog.testbenches.len() > 1` ならエラー（テストベンチは高々1つ）
   2. `build_module_defs` で全モジュール定義を1回ずつ解決・検証
-  3. `elaborate_top` でトップレベルのブロック群（とテストベンチの並行部分）を解決し、あわせて`SymbolTable`/`InstanceTable`を得る
+  3. `elaborate_top` でトップレベル（テストベンチの並行部分）を解決し、あわせて`SymbolTable`/`InstanceTable`を得る
   4. `resolve_initial` で、3で得た`SymbolTable`/`InstanceTable`を使ってテストベンチの`initial`を解決する
   5. `Elaborated { top, modules, initial }` を返す
 
@@ -740,7 +724,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `elaborate_top(prog: &Program, modules: &HashMap<String, ResolvedModuleDef>) -> Result<(ResolvedScope, SymbolTable, InstanceTable)>` :
 
-- 概要: トップレベルのブロック群（とテストベンチの並行部分）を解決する。後段の`resolve_initial`が同じシンボルテーブル・インスタンステーブルを再利用できるよう、`ResolvedScope`と一緒に返す。
+- 概要: トップレベル（テストベンチの並行部分）を解決する。後段の`resolve_initial`が同じシンボルテーブル・インスタンステーブルを再利用できるよう、`ResolvedScope`と一緒に返す。
 - 処理:
   1. `build_signals` で信号を解決
   2. `build_instances` でモジュールインスタンス化を解決（モジュールテーブルを参照）
@@ -754,8 +738,8 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)>` :
 
-- 概要: 全ブロック＋テストベンチの並行部分の宣言を走査し、シンボルテーブルと解決済み信号リストを構築する。1件ずつの登録は`push_signal`に切り出されている。
-- 処理: `prog.blocks`の`decls`を走査し、`clock`型があればエラー（`clock`型の`var`宣言はテストベンチ内でのみ許可される）、それ以外は`push_signal`で登録。続けて`prog.testbenches`の`decls`を走査し（`clock`型も許可）、同じく`push_signal`で登録。テストベンチの並行部分の宣言もトップレベルのブロックと全く同じ扱いでこの1本の信号空間に合流する。
+- 概要: テストベンチの並行部分の宣言を走査し、シンボルテーブルと解決済み信号リストを構築する（トップレベルの信号空間はここでのみ構築される）。1件ずつの登録は`push_signal`に切り出されている。
+- 処理: `prog.testbenches`の`decls`を走査し、それぞれ`push_signal`で登録する。
 
 `push_signal(signals: &mut Vec<ResolvedSignal>, symtab: &mut SymbolTable, decl: &Decl) -> Result<()>` :
 
@@ -763,7 +747,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `build_instances(prog: &Program, symtab: &SymbolTable, signals: &[ResolvedSignal], modules: &HashMap<String, ResolvedModuleDef>) -> Result<(Vec<ResolvedInstance>, InstanceTable)>` :
 
-- 概要: 全ブロック＋テストベンチの並行部分のモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。1件ずつの検査・解決は`check_instance_name_available`・`resolve_instance_connections`の2つの補助関数に切り出されており、`build_instances`自体はループを回してインスタンステーブルを育てながら結果を集約するだけになっている。
+- 概要: テストベンチの並行部分のモジュールインスタンス化を走査し、引数をポート定義と突き合わせて解決する。1件ずつの検査・解決は`check_instance_name_available`・`resolve_instance_connections`の2つの補助関数に切り出されており、`build_instances`自体はループを回してインスタンステーブルを育てながら結果を集約するだけになっている。
 - 処理: 各インスタンス化について、`check_instance_name_available`でインスタンス名の重複を検査 → 参照するモジュールが定義されているか検査 → `resolve_instance_connections`で引数をポート定義と突き合わせて解決 → インスタンステーブル（`instance_table`と、後続の接続式解決からも見える`resolved_so_far`の両方）に登録し、`ResolvedInstance`を積み上げる。`signals`は接続式の型検査（`clock`型かどうか）のために`resolve_instance_connections`へそのまま渡される。
 
 `check_instance_name_available(name: &str, symtab: &SymbolTable, instance_table: &InstanceTable) -> Result<()>` :
@@ -782,7 +766,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 `resolve_stmts(prog, symtab, instances, modules) -> Result<Vec<ResolvedStmt>>` :
 
-- 概要: 全ブロック＋テストベンチの並行部分の代入文を走査し、変数名をシンボルIDに解決する。
+- 概要: テストベンチの並行部分の代入文を走査し、変数名をシンボルIDに解決する。
 - 処理: 代入先の変数名をシンボルテーブルで ID に解決（未宣言ならエラー）、右辺の式を再帰的に解決（`resolve_expr`。インスタンステーブルとモジュールテーブルも渡す）、代入の種類（Combinational/Sequential）を保持
 
 `check_multiple_drivers(stmts: &[ResolvedStmt], signals: &[ResolvedSignal]) -> Result<()>` :

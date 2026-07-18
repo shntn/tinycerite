@@ -133,8 +133,8 @@ pub type InstanceTable = HashMap<String, String>;
 /// エラボレーションを実行する
 ///
 /// まずモジュール定義をそれぞれ独立に（インスタンス化の有無によらず）解決・検証し、
-/// そのあとトップレベルのブロックを解決する。トップレベルは信号・代入文に加えて
-/// モジュールインスタンスも解決するため、モジュール定義のテーブルを参照する。
+/// そのあとトップレベル（テストベンチの並行部分）を解決する。トップレベルは信号・
+/// 代入文に加えてモジュールインスタンスも解決するため、モジュール定義のテーブルを参照する。
 /// 最後に、テストベンチの`initial`（手続き文）をトップレベルのシンボルテーブルで解決する。
 pub fn elaborate(prog: &Program) -> Result<Elaborated> {
     if prog.testbenches.len() > 1 {
@@ -291,7 +291,7 @@ fn resolve_module_stmts(m: &ModuleDef, symtab: &SymbolTable, ports: &[ResolvedPo
     Ok(stmts)
 }
 
-/// トップレベルのブロック群（とテストベンチの並行部分）を解決する:
+/// トップレベル（テストベンチの並行部分）を解決する:
 /// 信号・インスタンス・代入文の順に解決し、静的チェックを適用する。
 /// 後段の`resolve_initial`が同じシンボルテーブル・インスタンステーブルを使えるよう、
 /// スコープと一緒に返す。
@@ -340,24 +340,12 @@ fn resolve_initial(
 
 /// 宣言を走査し、シンボルテーブルと解決済み信号リストを構築する（重複宣言はエラー）
 ///
-/// トップレベルのブロックとテストベンチの並行部分は、どちらも同じフラットな
-/// 信号空間に合流する（テストベンチの`decls`もここで一緒に登録される）。
+/// トップレベルの信号空間はテストベンチの並行部分の`decls`から構築される
+/// （`clock`型の`var`宣言はテストベンチ内でのみ許可されるため、ここでは検査不要）。
 fn build_signals(prog: &Program) -> Result<(Vec<ResolvedSignal>, SymbolTable)> {
     let mut signals = Vec::new();
     let mut symtab = SymbolTable::new();
 
-    // `block`側の`decl`は`clock`型を許可しない（clock型のvar宣言はテストベンチ内でのみ許可される）
-    for decl in prog.blocks.iter().flat_map(|b| &b.decls) {
-        if decl.sig_type.is_clock() {
-            return Err(ElabError {
-                message: format!(
-                    "変数 '{}': clock型のvar宣言はテストベンチ内でのみ許可されています",
-                    decl.name
-                ),
-            });
-        }
-        push_signal(&mut signals, &mut symtab, decl)?;
-    }
     for decl in prog.testbenches.iter().flat_map(|t| &t.decls) {
         push_signal(&mut signals, &mut symtab, decl)?;
     }
@@ -396,11 +384,7 @@ fn build_instances(
     // ここまでに解決済みのインスタンスも見えるようにテーブルを育てながら解決する
     let mut resolved_so_far: HashMap<String, String> = HashMap::new();
 
-    let all_instances = prog
-        .blocks
-        .iter()
-        .flat_map(|b| &b.instances)
-        .chain(prog.testbenches.iter().flat_map(|t| &t.instances));
+    let all_instances = prog.testbenches.iter().flat_map(|t| &t.instances);
 
     for inst in all_instances {
         check_instance_name_available(&inst.instance_name, symtab, &instance_table)?;
@@ -517,11 +501,7 @@ fn resolve_stmts(
 ) -> Result<Vec<ResolvedStmt>> {
     let mut stmts = Vec::new();
 
-    let all_stmts = prog
-        .blocks
-        .iter()
-        .flat_map(|b| &b.stmts)
-        .chain(prog.testbenches.iter().flat_map(|t| &t.stmts));
+    let all_stmts = prog.testbenches.iter().flat_map(|t| &t.stmts);
 
     for stmt in all_stmts {
         let target = stmt.target();

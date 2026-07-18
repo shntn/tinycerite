@@ -1,4 +1,4 @@
-{
+testbench tb {
     var     a: bit;
     var     b: bit;
 

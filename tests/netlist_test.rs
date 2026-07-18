@@ -17,14 +17,14 @@ fn whole_pipeline(input: &str) -> String {
 
 #[test]
 fn example1_produces_correct_signal_count() {
-    let input = "{\n    var     a: bit;\n    var     b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
+    let input = "testbench tb {\n    var     a: bit;\n    var     b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
     let nl = netlist_of(input);
     assert_eq!(nl.signals.len(), 2);
 }
 
 #[test]
 fn example1_produces_six_nodes() {
-    let input = "{\n    var     a: bit;\n    var     b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
+    let input = "testbench tb {\n    var     a: bit;\n    var     b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
     let nl = netlist_of(input);
     // Const(1), Read(b), Xor, Drive(a), Read(a), Drive(b)
     assert_eq!(nl.nodes.len(), 6);
@@ -32,7 +32,7 @@ fn example1_produces_six_nodes() {
 
 #[test]
 fn blocking_assign_is_combinational() {
-    let input = "{ var a: bit; var b: bit; a = b ^ 1; }";
+    let input = "testbench tb { var a: bit; var b: bit; a = b ^ 1; }";
     let nl = netlist_of(input);
     // a のドライバは blocking
     let sig = &nl.signals[0];
@@ -42,7 +42,7 @@ fn blocking_assign_is_combinational() {
 
 #[test]
 fn non_blocking_assign_is_sequential() {
-    let input = "{ var a: bit; var b: bit; b <= a; }";
+    let input = "testbench tb { var a: bit; var b: bit; b <= a; }";
     let nl = netlist_of(input);
     // b のドライバは non-blocking
     let sig = &nl.signals[1];
@@ -52,46 +52,46 @@ fn non_blocking_assign_is_sequential() {
 
 #[test]
 fn format_output_contains_signal_and_node_sections() {
-    let text = whole_pipeline("{ var a: bit; a = 0; }");
+    let text = whole_pipeline("testbench tb { var a: bit; a = 0; }");
     assert!(text.contains("Signals"), "出力に Signals セクションが必要");
     assert!(text.contains("Nodes"), "出力に Nodes セクションが必要");
 }
 
 #[test]
 fn bit_vector_width_is_preserved() {
-    let input = "{ var x: bit<8>; x = 0; }";
+    let input = "testbench tb { var x: bit<8>; x = 0; }";
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].width, 8);
 }
 
 #[test]
 fn bit_width_one_by_default() {
-    let input = "{ var x: bit; x = 0; }";
+    let input = "testbench tb { var x: bit; x = 0; }";
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].width, 1);
 }
 
 #[test]
 fn combinational_signal_defaults_to_wire_kind() {
-    let input = "{ var a: bit; var b: bit; a = b ^ 1; }";
+    let input = "testbench tb { var a: bit; var b: bit; a = b ^ 1; }";
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].kind, SignalKind::Wire);
 }
 
 #[test]
 fn sequential_signal_defaults_to_reg_kind_with_no_clock_or_reset() {
-    let input = "{ var a: bit; var b: bit; b <= a; }";
+    let input = "testbench tb { var a: bit; var b: bit; b <= a; }";
     let nl = netlist_of(input);
     assert_eq!(
         nl.signals[1].kind,
         SignalKind::Reg { clock: None, reset: None },
-        "クロック/リセット未指定は現行のstep単位更新のまま"
+        "モジュールに属さないregはクロック紐付けの対象外で、現行のstep単位更新のまま"
     );
 }
 
 #[test]
 fn undriven_signal_defaults_to_wire_kind() {
-    let input = "{ var a: bit; }";
+    let input = "testbench tb { var a: bit; }";
     let nl = netlist_of(input);
     assert_eq!(nl.signals[0].kind, SignalKind::Wire);
 }
@@ -103,7 +103,7 @@ fn adder_src() -> &'static str {
 #[test]
 fn module_instance_signals_are_flattened_with_instance_name_prefix() {
     let src = format!(
-        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        "{} testbench tb {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
         adder_src()
     );
     let nl = netlist_of(&src);
@@ -118,7 +118,7 @@ fn module_instance_signals_are_flattened_with_instance_name_prefix() {
 #[test]
 fn module_instance_signals_preserve_declared_width() {
     let src = format!(
-        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        "{} testbench tb {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
         adder_src()
     );
     let nl = netlist_of(&src);
@@ -129,7 +129,7 @@ fn module_instance_signals_preserve_declared_width() {
 #[test]
 fn module_instance_input_port_is_driven_by_connection_expr() {
     let src = format!(
-        "{} {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
+        "{} testbench tb {{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }}",
         adder_src()
     );
     let nl = netlist_of(&src);
@@ -140,7 +140,7 @@ fn module_instance_input_port_is_driven_by_connection_expr() {
 #[test]
 fn two_instances_of_the_same_module_get_distinct_namespaces() {
     let src = format!(
-        "{adder} {{ var x: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: x, b: x); }}",
+        "{adder} testbench tb {{ var x: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: x, b: x); }}",
         adder = adder_src()
     );
     let nl = netlist_of(&src);
@@ -152,7 +152,7 @@ fn two_instances_of_the_same_module_get_distinct_namespaces() {
 
 #[test]
 fn no_initial_block_produces_empty_initial_steps() {
-    let nl = netlist_of("{ var a: bit; a = 0; }");
+    let nl = netlist_of("testbench tb { var a: bit; a = 0; }");
     assert!(nl.initial.is_empty());
 }
 

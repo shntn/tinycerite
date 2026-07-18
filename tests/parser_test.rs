@@ -7,33 +7,33 @@ fn parse(input: &str) -> tinycerilte::ast::Program {
 }
 
 #[test]
-fn empty_block() {
-    let prog = parse("{}");
-    assert_eq!(prog.blocks.len(), 1);
-    assert_eq!(prog.blocks[0].decls.len(), 0);
-    assert_eq!(prog.blocks[0].stmts.len(), 0);
+fn empty_testbench() {
+    let prog = parse("testbench tb {}");
+    assert_eq!(prog.testbenches.len(), 1);
+    assert_eq!(prog.testbenches[0].decls.len(), 0);
+    assert_eq!(prog.testbenches[0].stmts.len(), 0);
 }
 
 #[test]
 fn single_bit_declaration() {
-    let prog = parse("{ var x: bit; }");
-    let decl = &prog.blocks[0].decls[0];
+    let prog = parse("testbench tb { var x: bit; }");
+    let decl = &prog.testbenches[0].decls[0];
     assert_eq!(decl.name, "x");
     assert_eq!(decl.sig_type, SignalType::Bit(None), "bit は幅なし = 1-bit");
 }
 
 #[test]
 fn bit_vector_declaration() {
-    let prog = parse("{ var x: bit<8>; }");
-    let decl = &prog.blocks[0].decls[0];
+    let prog = parse("testbench tb { var x: bit<8>; }");
+    let decl = &prog.testbenches[0].decls[0];
     assert_eq!(decl.name, "x");
     assert_eq!(decl.sig_type, SignalType::Bit(Some(8)));
 }
 
 #[test]
 fn combinational_assign_is_blocking() {
-    let prog = parse("{ a = b ^ 1; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { a = b ^ 1; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { target, expr } => {
             assert_eq!(target, "a");
@@ -45,8 +45,8 @@ fn combinational_assign_is_blocking() {
 
 #[test]
 fn sequential_assign_is_non_blocking() {
-    let prog = parse("{ b <= a; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { b <= a; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Sequential { target, expr } => {
             assert_eq!(target, "b");
@@ -58,67 +58,62 @@ fn sequential_assign_is_non_blocking() {
 
 #[test]
 fn full_example_parses_correctly() {
-    let input = "{\n    var a: bit;\n    var b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
+    let input = "testbench tb {\n    var a: bit;\n    var b: bit;\n\n    a = b ^ 1;\n    b <= a;\n}";
     let prog = parse(input);
-    let block = &prog.blocks[0];
-    assert_eq!(block.decls.len(), 2);
-    assert_eq!(block.stmts.len(), 2);
-    assert_eq!(block.decls[0].name, "a");
-    assert_eq!(block.decls[1].name, "b");
-    assert!(matches!(block.stmts[0], Stmt::Combinational { .. }));
-    assert!(matches!(block.stmts[1], Stmt::Sequential { .. }));
+    let tb = &prog.testbenches[0];
+    assert_eq!(tb.decls.len(), 2);
+    assert_eq!(tb.stmts.len(), 2);
+    assert_eq!(tb.decls[0].name, "a");
+    assert_eq!(tb.decls[1].name, "b");
+    assert!(matches!(tb.stmts[0], Stmt::Combinational { .. }));
+    assert!(matches!(tb.stmts[1], Stmt::Sequential { .. }));
 }
 
 #[test]
 fn incomplete_statement_is_error() {
-    assert!(Parser::parse_program("{ var a: bit; a = }").is_err());
+    assert!(Parser::parse_program("testbench tb { var a: bit; a = }").is_err());
 }
 
 #[test]
 fn missing_rbrace_is_error() {
-    assert!(Parser::parse_program("{ var a: bit; ").is_err());
+    assert!(Parser::parse_program("testbench tb { var a: bit; ").is_err());
 }
 
 #[test]
 fn keyword_var_as_variable_name_is_error() {
-    assert!(Parser::parse_program("{ var x: bit; var = 1; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; var = 1; }").is_err());
 }
 
 #[test]
 fn keyword_bit_as_variable_name_is_error() {
-    assert!(Parser::parse_program("{ var x: bit; bit <= x; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; bit <= x; }").is_err());
 }
 
 #[test]
 fn keyword_in_expression_is_error() {
-    assert!(Parser::parse_program("{ var x: bit; x = var; }").is_err());
-    assert!(Parser::parse_program("{ var x: bit; x = bit; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; x = var; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; x = bit; }").is_err());
 }
 
 #[test]
 fn chained_xor_with_three_or_more_operands_parses_successfully() {
     assert!(Parser::parse_program(
-        "{ var a: bit; var b: bit; var c: bit; var d: bit; a = b ^ c ^ d; }"
+        "testbench tb { var a: bit; var b: bit; var c: bit; var d: bit; a = b ^ c ^ d; }"
     )
     .is_ok());
 }
 
 #[test]
-fn multiple_top_level_blocks_are_parsed() {
-    let prog = parse("{ var a: bit; } { var b: bit; }");
-    assert_eq!(prog.blocks.len(), 2);
-}
-
-#[test]
 fn decl_and_stmt_can_interleave_in_any_order() {
-    let prog = parse("{ var a: bit; a = 1; var b: bit; b <= a; }");
-    assert_eq!((prog.blocks[0].decls.len(), prog.blocks[0].stmts.len()), (2, 2));
+    let prog = parse("testbench tb { var a: bit; a = 1; var b: bit; b <= a; }");
+    let tb = &prog.testbenches[0];
+    assert_eq!((tb.decls.len(), tb.stmts.len()), (2, 2));
 }
 
 #[test]
 fn leading_zeros_in_number_literal_are_parsed() {
-    let prog = parse("{ var x: bit; x = 007; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = 007; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => assert!(matches!(expr, Expr::Number(7))),
         _ => panic!("comb assign が期待される"),
@@ -127,7 +122,7 @@ fn leading_zeros_in_number_literal_are_parsed() {
 
 #[test]
 fn overflow_number_literal_is_error() {
-    assert!(Parser::parse_program("{ var x: bit; x = 99999999999999999999; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; x = 99999999999999999999; }").is_err());
 }
 
 #[test]
@@ -137,8 +132,8 @@ fn empty_input_is_error() {
 
 #[test]
 fn multiplication_binds_tighter_than_addition() {
-    let prog = parse("{ var x: bit; x = 1 + 2 * 3; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = 1 + 2 * 3; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             // 1 + (2 * 3) の形（Addが最外、rhsがMulのBinOp）になっているはず
@@ -155,7 +150,7 @@ fn multiplication_binds_tighter_than_addition() {
 
 #[test]
 fn parenthesized_expression_overrides_precedence() {
-    assert!(Parser::parse_program("{ var x: bit; x = (1 + 2) * 3; }").is_ok());
+    assert!(Parser::parse_program("testbench tb { var x: bit; x = (1 + 2) * 3; }").is_ok());
 }
 
 #[test]
@@ -165,15 +160,15 @@ fn all_new_binary_operators_parse_successfully() {
         "*", "/", "%",
     ];
     for op in ops {
-        let src = format!("{{ var x: bit; x = 1 {op} 2; }}");
+        let src = format!("testbench tb {{ var x: bit; x = 1 {op} 2; }}");
         assert!(Parser::parse_program(&src).is_ok(), "演算子 {op} がパースできる");
     }
 }
 
 #[test]
 fn unary_not_parses_as_unaryop() {
-    let prog = parse("{ var x: bit; x = !x; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = !x; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::UnaryOp { op: UnOp::Not, .. }));
@@ -184,8 +179,8 @@ fn unary_not_parses_as_unaryop() {
 
 #[test]
 fn unary_bitnot_parses_as_unaryop() {
-    let prog = parse("{ var x: bit; x = ~x; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = ~x; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::UnaryOp { op: UnOp::BitNot, .. }));
@@ -196,8 +191,8 @@ fn unary_bitnot_parses_as_unaryop() {
 
 #[test]
 fn chained_unary_operators_nest_right_to_left() {
-    let prog = parse("{ var x: bit; x = !~x; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = !~x; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => match expr {
             Expr::UnaryOp { op: UnOp::Not, expr } => {
@@ -211,8 +206,8 @@ fn chained_unary_operators_nest_right_to_left() {
 
 #[test]
 fn unary_operator_binds_tighter_than_multiplication() {
-    let prog = parse("{ var x: bit; x = !x * 2; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; x = !x * 2; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             // (!x) * 2 の形（Mulが最外、lhsがUnaryOp）になっているはず
@@ -229,8 +224,8 @@ fn unary_operator_binds_tighter_than_multiplication() {
 
 #[test]
 fn binary_bitvec_literal_parses_correctly() {
-    let prog = parse("{ var x: bit<4>; x = 4'b1010; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit<4>; x = 4'b1010; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BitVecLiteral { width: 4, value: 10 }));
@@ -241,8 +236,8 @@ fn binary_bitvec_literal_parses_correctly() {
 
 #[test]
 fn hex_bitvec_literal_parses_correctly() {
-    let prog = parse("{ var x: bit<8>; x = 8'hFF; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit<8>; x = 8'hFF; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 255 }));
@@ -253,14 +248,14 @@ fn hex_bitvec_literal_parses_correctly() {
 
 #[test]
 fn octal_and_decimal_bitvec_literals_parse_correctly() {
-    let prog = parse("{ var x: bit<8>; var y: bit<8>; x = 8'o17; y = 8'd200; }");
-    match &prog.blocks[0].stmts[0] {
+    let prog = parse("testbench tb { var x: bit<8>; var y: bit<8>; x = 8'o17; y = 8'd200; }");
+    match &prog.testbenches[0].stmts[0] {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 15 }));
         }
         _ => panic!("comb assign が期待される"),
     }
-    match &prog.blocks[0].stmts[1] {
+    match &prog.testbenches[0].stmts[1] {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 200 }));
         }
@@ -270,8 +265,8 @@ fn octal_and_decimal_bitvec_literals_parse_correctly() {
 
 #[test]
 fn lowercase_hex_digits_in_bitvec_literal_parse_correctly() {
-    let prog = parse("{ var x: bit<8>; x = 8'hff; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit<8>; x = 8'hff; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BitVecLiteral { width: 8, value: 255 }));
@@ -282,13 +277,13 @@ fn lowercase_hex_digits_in_bitvec_literal_parse_correctly() {
 
 #[test]
 fn digit_invalid_for_radix_in_bitvec_literal_is_error() {
-    assert!(Parser::parse_program("{ var x: bit<4>; x = 2'b19; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit<4>; x = 2'b19; }").is_err());
 }
 
 #[test]
 fn ternary_operator_parses_as_ternary_expr() {
-    let prog = parse("{ var x: bit; var a: bit; x = a ? 1 : 0; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; var a: bit; x = a ? 1 : 0; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::Ternary { .. }));
@@ -300,8 +295,8 @@ fn ternary_operator_parses_as_ternary_expr() {
 #[test]
 fn ternary_operator_is_right_associative() {
     // a ? b : c ? d : e は a ? b : (c ? d : e) になるはず
-    let prog = parse("{ var x: bit; var a: bit; var c: bit; x = a ? 1 : c ? 2 : 3; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; var a: bit; var c: bit; x = a ? 1 : c ? 2 : 3; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => match expr {
             Expr::Ternary { else_branch, .. } => {
@@ -316,8 +311,8 @@ fn ternary_operator_is_right_associative() {
 #[test]
 fn ternary_operator_has_lower_precedence_than_binary_operators() {
     // a || b ? 1 : 0 は (a || b) ? 1 : 0 になるはず（condが二項式全体）
-    let prog = parse("{ var x: bit; var a: bit; var b: bit; x = a || b ? 1 : 0; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; var a: bit; var b: bit; x = a || b ? 1 : 0; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => match expr {
             Expr::Ternary { cond, .. } => {
@@ -331,14 +326,14 @@ fn ternary_operator_has_lower_precedence_than_binary_operators() {
 
 #[test]
 fn parenthesized_ternary_expression_parses_successfully() {
-    assert!(Parser::parse_program("{ var x: bit; var a: bit; x = (a ? 1 : 0) + 1; }").is_ok());
+    assert!(Parser::parse_program("testbench tb { var x: bit; var a: bit; x = (a ? 1 : 0) + 1; }").is_ok());
 }
 
 #[test]
 fn not_equal_operator_is_unaffected_by_unary_not() {
     // "!=" は eq_op として扱われ、単項の "!" とは別物であることを確認
-    let prog = parse("{ var x: bit; var y: bit; x = y != 1; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var x: bit; var y: bit; x = y != 1; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::BinOp { op: BinOp::Neq, .. }));
@@ -375,20 +370,20 @@ fn module_def_can_have_internal_decls() {
 }
 
 #[test]
-fn multiple_modules_and_blocks_can_coexist() {
+fn multiple_modules_and_testbench_can_coexist() {
     let prog = parse(
-        "module a { port {} } { var x: bit; } module b { port {} } { var y: bit; }",
+        "module a { port {} } testbench tb { var x: bit; } module b { port {} }",
     );
     assert_eq!(prog.modules.len(), 2);
-    assert_eq!(prog.blocks.len(), 2);
+    assert_eq!(prog.testbenches.len(), 1);
 }
 
 #[test]
 fn instance_decl_parses_with_named_args() {
     let prog = parse(
-        "{ var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }",
+        "testbench tb { var x: bit<8>; var y: bit<8>; var u1 = adder(a: x, b: y); }",
     );
-    let inst = &prog.blocks[0].instances[0];
+    let inst = &prog.testbenches[0].instances[0];
     assert_eq!(inst.instance_name, "u1");
     assert_eq!(inst.module_name, "adder");
     assert_eq!(inst.args.len(), 2);
@@ -398,14 +393,14 @@ fn instance_decl_parses_with_named_args() {
 
 #[test]
 fn instance_decl_with_no_args_parses() {
-    let prog = parse("{ var u1 = m(); }");
-    assert_eq!(prog.blocks[0].instances[0].args.len(), 0);
+    let prog = parse("testbench tb { var u1 = m(); }");
+    assert_eq!(prog.testbenches[0].instances[0].args.len(), 0);
 }
 
 #[test]
 fn field_access_parses_as_expr() {
-    let prog = parse("{ var z: bit<8>; var u1 = adder(); z = u1.sum; }");
-    let stmt = &prog.blocks[0].stmts[0];
+    let prog = parse("testbench tb { var z: bit<8>; var u1 = adder(); z = u1.sum; }");
+    let stmt = &prog.testbenches[0].stmts[0];
     match stmt {
         Stmt::Combinational { expr, .. } => {
             assert!(matches!(expr, Expr::FieldAccess { instance, field } if instance == "u1" && field == "sum"));
@@ -416,7 +411,7 @@ fn field_access_parses_as_expr() {
 
 #[test]
 fn field_access_usable_inside_larger_expression() {
-    assert!(Parser::parse_program("{ var z: bit<8>; var u1 = adder(); z = u1.sum + 1; }").is_ok());
+    assert!(Parser::parse_program("testbench tb { var z: bit<8>; var u1 = adder(); z = u1.sum + 1; }").is_ok());
 }
 
 #[test]
@@ -431,7 +426,7 @@ fn input_keyword_as_port_name_is_error() {
 
 #[test]
 fn output_keyword_as_signal_name_is_error() {
-    assert!(Parser::parse_program("{ var output: bit; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var output: bit; }").is_err());
 }
 
 #[test]
@@ -450,21 +445,21 @@ fn module_cannot_contain_instance_decl() {
 
 #[test]
 fn line_comment_is_ignored_between_statements() {
-    let prog = parse("{ var x: bit; // これはコメント\n x = 1; }");
-    assert_eq!(prog.blocks[0].stmts.len(), 1);
+    let prog = parse("testbench tb { var x: bit; // これはコメント\n x = 1; }");
+    assert_eq!(prog.testbenches[0].stmts.len(), 1);
 }
 
 #[test]
 fn line_comment_at_end_of_line_is_ignored() {
-    let prog = parse("{ var x: bit; x = 1; // 行末コメント\n }");
-    assert_eq!(prog.blocks[0].stmts.len(), 1);
+    let prog = parse("testbench tb { var x: bit; x = 1; // 行末コメント\n }");
+    assert_eq!(prog.testbenches[0].stmts.len(), 1);
 }
 
 #[test]
 fn trailing_unparseable_garbage_after_valid_program_is_error() {
     // programルールがEOIまで消費することを要求していないと、末尾の不正な入力が
     // 静かに無視されてしまう（過去に実際に発生したバグ）。EOIの強制でエラーになることを確認する。
-    assert!(Parser::parse_program("{ var x: bit; } @@@invalid@@@").is_err());
+    assert!(Parser::parse_program("testbench tb { var x: bit; } @@@invalid@@@").is_err());
 }
 
 #[test]
@@ -519,12 +514,12 @@ fn testbench_keyword_as_name_is_error() {
 
 #[test]
 fn initial_keyword_as_signal_name_is_error() {
-    assert!(Parser::parse_program("{ var initial: bit; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var initial: bit; }").is_err());
 }
 
 #[test]
 fn step_keyword_as_signal_name_is_error() {
-    assert!(Parser::parse_program("{ var step: bit; }").is_err());
+    assert!(Parser::parse_program("testbench tb { var step: bit; }").is_err());
 }
 
 #[test]

@@ -1,19 +1,10 @@
 use std::fmt;
 
-/// プログラム全体（トップレベルのブロック・モジュール定義・テストベンチ定義）
+/// プログラム全体（モジュール定義・テストベンチ定義）
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub blocks: Vec<Block>,
     pub modules: Vec<ModuleDef>,
     pub testbenches: Vec<TestbenchDef>,
-}
-
-/// ブロック
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub decls: Vec<Decl>,
-    pub instances: Vec<InstDecl>,
-    pub stmts: Vec<Stmt>,
 }
 
 /// ポートの向き

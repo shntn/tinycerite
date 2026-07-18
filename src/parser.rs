@@ -48,14 +48,12 @@ impl Parser {
     /// 入力文字列をパースし、AST の Program を返す
     pub fn parse_program(input: &str) -> Result<Program> {
         let pairs = CeriteParser::parse(Rule::program, input)?;
-        let mut blocks = Vec::new();
         let mut modules = Vec::new();
         let mut testbenches = Vec::new();
         for pair in pairs {
             if pair.as_rule() == Rule::program {
                 for item_pair in pair.into_inner() {
                     match item_pair.as_rule() {
-                        Rule::block => blocks.push(parse_block(item_pair)?),
                         Rule::module_def => modules.push(parse_module_def(item_pair)?),
                         Rule::testbench_def => testbenches.push(parse_testbench_def(item_pair)?),
                         _ => {}
@@ -63,25 +61,8 @@ impl Parser {
                 }
             }
         }
-        Ok(Program { blocks, modules, testbenches })
+        Ok(Program { modules, testbenches })
     }
-}
-
-fn parse_block(pair: Pair<Rule>) -> Result<Block> {
-    let mut decls = Vec::new();
-    let mut instances = Vec::new();
-    let mut stmts = Vec::new();
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::decl => decls.push(parse_decl(inner)?),
-            Rule::inst_decl => instances.push(parse_inst_decl(inner)?),
-            Rule::stmt => stmts.push(parse_stmt(inner)?),
-            _ => {} // "{" "}" などは無視
-        }
-    }
-
-    Ok(Block { decls, instances, stmts })
 }
 
 /// `module_def`（`"module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}"`）をパースする

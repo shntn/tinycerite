@@ -3,7 +3,7 @@ use tinycerilte::parser::Parser;
 
 #[test]
 fn elaborated_signals_have_correct_names_and_widths() {
-    let prog = Parser::parse_program("{ var a: bit; var b: bit<16>; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; var b: bit<16>; }")
         .unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     assert_eq!(elab.top.signals.len(), 2);
@@ -15,7 +15,7 @@ fn elaborated_signals_have_correct_names_and_widths() {
 
 #[test]
 fn elaborated_stmts_preserve_assign_kind() {
-    let prog = Parser::parse_program("{ var a: bit; var b: bit; a = b ^ 1; b <= a; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; var b: bit; a = b ^ 1; b <= a; }")
         .unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     assert_eq!(elab.top.stmts.len(), 2);
@@ -26,7 +26,7 @@ fn elaborated_stmts_preserve_assign_kind() {
 
 #[test]
 fn undefined_signal_is_error() {
-    let prog = Parser::parse_program("{ var a: bit; a = b ^ 1; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; a = b ^ 1; }")
         .unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("b"), "エラーメッセージに未定義変数名を含む");
@@ -34,7 +34,7 @@ fn undefined_signal_is_error() {
 
 #[test]
 fn duplicate_declaration_is_error() {
-    let prog = Parser::parse_program("{ var a: bit; var a: bit; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; var a: bit; }")
         .unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("重複"), "エラーメッセージに重複を示す文言を含む");
@@ -42,7 +42,7 @@ fn duplicate_declaration_is_error() {
 
 #[test]
 fn assignment_to_undeclared_target_is_error() {
-    let prog = Parser::parse_program("{ x = 0; }")
+    let prog = Parser::parse_program("testbench tb { x = 0; }")
         .unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("x"));
@@ -50,7 +50,7 @@ fn assignment_to_undeclared_target_is_error() {
 
 #[test]
 fn multiple_drivers_to_same_signal_is_error() {
-    let prog = Parser::parse_program("{ var x: bit; x = 1; x = 0; }")
+    let prog = Parser::parse_program("testbench tb { var x: bit; x = 1; x = 0; }")
         .unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("複数のドライバ"));
@@ -58,7 +58,7 @@ fn multiple_drivers_to_same_signal_is_error() {
 
 #[test]
 fn combinational_self_loop_is_detected() {
-    let prog = Parser::parse_program("{ var a: bit; a = a ^ 1; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; a = a ^ 1; }")
         .unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("組合せループ"), "エラー: {}", err.message);
@@ -67,18 +67,18 @@ fn combinational_self_loop_is_detected() {
 #[test]
 fn sequential_edge_does_not_cause_loop() {
     // sequential 代入を経由する循環は組合せループではない
-    let prog = Parser::parse_program("{ var a: bit; var b: bit; a = b ^ 1; b <= a; }")
+    let prog = Parser::parse_program("testbench tb { var a: bit; var b: bit; a = b ^ 1; b <= a; }")
         .unwrap();
     assert!(elaboration::elaborate(&prog).is_ok(), "seq代入で切れるのでループなし");
 }
 
 #[test]
-fn signal_declared_in_later_block_is_visible_to_earlier_block_stmt() {
-    // 全ブロックの宣言を先に集めてからstmtを解決するため、ブロックをまたいだ前方参照が可能
-    let prog = Parser::parse_program("{ a = b ^ 1; } { var a: bit; var b: bit; }").unwrap();
+fn signal_declared_later_is_visible_to_earlier_stmt() {
+    // 全宣言を先に集めてからstmtを解決するため、宣言より前に書かれたstmtからの前方参照が可能
+    let prog = Parser::parse_program("testbench tb { a = b ^ 1; var a: bit; var b: bit; }").unwrap();
     assert!(
         elaboration::elaborate(&prog).is_ok(),
-        "ブロックをまたいでも名前空間はフラットに共有される"
+        "宣言より前に書かれたstmtからも前方参照できる"
     );
 }
 
@@ -91,7 +91,7 @@ fn adder_src() -> &'static str {
 #[test]
 fn module_instantiation_resolves_successfully() {
     let src = format!(
-        "{} {{ var x: bit<8>; var y: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: y); z = u1.sum; }}",
+        "{} testbench tb {{ var x: bit<8>; var y: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: y); z = u1.sum; }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -143,14 +143,14 @@ fn unused_module_body_is_still_validated() {
 
 #[test]
 fn instantiating_undefined_module_is_error() {
-    let prog = Parser::parse_program("{ var u1 = ghost(); }").unwrap();
+    let prog = Parser::parse_program("testbench tb { var u1 = ghost(); }").unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("ghost"), "エラー: {}", err.message);
 }
 
 #[test]
 fn missing_input_connection_is_error() {
-    let src = format!("{} {{ var x: bit<8>; var u1 = adder(a: x); }}", adder_src());
+    let src = format!("{} testbench tb {{ var x: bit<8>; var u1 = adder(a: x); }}", adder_src());
     let prog = Parser::parse_program(&src).unwrap();
     let err = elaboration::elaborate(&prog).unwrap_err();
     assert!(err.message.contains("b"), "エラー: {}", err.message);
@@ -159,7 +159,7 @@ fn missing_input_connection_is_error() {
 #[test]
 fn connecting_output_port_as_argument_is_error() {
     let src = format!(
-        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x, sum: z); }}",
+        "{} testbench tb {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x, sum: z); }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -170,7 +170,7 @@ fn connecting_output_port_as_argument_is_error() {
 #[test]
 fn unknown_port_name_as_argument_is_error() {
     let src = format!(
-        "{} {{ var x: bit<8>; var u1 = adder(a: x, b: x, ghost: x); }}",
+        "{} testbench tb {{ var x: bit<8>; var u1 = adder(a: x, b: x, ghost: x); }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -181,7 +181,7 @@ fn unknown_port_name_as_argument_is_error() {
 #[test]
 fn instance_name_colliding_with_signal_name_is_error() {
     let src = format!(
-        "{} {{ var x: bit<8>; var x = adder(a: x, b: x); }}",
+        "{} testbench tb {{ var x: bit<8>; var x = adder(a: x, b: x); }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -191,7 +191,7 @@ fn instance_name_colliding_with_signal_name_is_error() {
 #[test]
 fn reading_input_port_field_from_outside_is_error() {
     let src = format!(
-        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.a; }}",
+        "{} testbench tb {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.a; }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -202,7 +202,7 @@ fn reading_input_port_field_from_outside_is_error() {
 #[test]
 fn reading_nonexistent_field_is_error() {
     let src = format!(
-        "{} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.ghost; }}",
+        "{} testbench tb {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); z = u1.ghost; }}",
         adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
@@ -214,7 +214,7 @@ fn reading_nonexistent_field_is_error() {
 fn instance_output_can_feed_another_instance_input() {
     // 同じスコープ内で、あるインスタンスの出力を別のインスタンスの入力に接続できる
     let src = format!(
-        "{adder} {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: u1.sum, b: x); z = u2.sum; }}",
+        "{adder} testbench tb {{ var x: bit<8>; var z: bit<8>; var u1 = adder(a: x, b: x); var u2 = adder(a: u1.sum, b: x); z = u2.sum; }}",
         adder = adder_src()
     );
     let prog = Parser::parse_program(&src).unwrap();
