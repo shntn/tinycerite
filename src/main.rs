@@ -171,7 +171,7 @@ fn run_simulation_phase(nl: &Netlist, cycles: Option<u64>) {
 
     let Some(n) = cycles else { return };
 
-    let mut sim = simulator::Simulator::new(nl.signals.len());
+    let mut sim = simulator::Simulator::new(&nl.signals);
     let snaps = if n > 0 { sim.run(&nl.nodes, n) } else { Vec::new() };
     print_simulation_result(&format!("Simulation ({n} cycles)"), &snaps, nl);
 }
@@ -185,7 +185,7 @@ fn print_simulation_result(phase_label: &str, snaps: &[simulator::CycleSnapshot]
 /// テストベンチの`initial`手続きを実行する: `Assign`はその場で値を設定し、
 /// `Step`は1サイクル進めてスナップショットを記録する。
 fn run_initial_sequence(nl: &Netlist) -> Vec<simulator::CycleSnapshot> {
-    let mut sim = simulator::Simulator::new(nl.signals.len());
+    let mut sim = simulator::Simulator::new(&nl.signals);
     let mut snaps = Vec::new();
 
     for step in &nl.initial {

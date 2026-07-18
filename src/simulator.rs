@@ -1,4 +1,4 @@
-use crate::netlist::{DriveKind, Node, NodeId};
+use crate::netlist::{DriveKind, Edge, NetlistSignal, Node, NodeId, SignalKind};
 
 /// 組み合わせ評価の最大Δ-サイクル数（これを超えると組合せループと判定）
 const MAX_COMB_ITERATIONS: u32 = 1000;
@@ -13,14 +13,24 @@ pub struct CycleSnapshot {
 /// シミュレーター
 pub struct Simulator {
     signal_values: Vec<u64>,
+    /// 直前のstep呼び出しの`settled`（1つ前のサイクルの組み合わせ収束後の値）。
+    /// regのクロックエッジ検出に使う（詳細は`step`内のコメントを参照）。
+    prev_signal_values: Vec<u64>,
+    /// 各信号の種別（wire/reg、およびregのクロック紐付け）。`SignalKind`だけを
+    /// `NetlistSignal`から複製して持つ（`step`が信号値だけでなくクロック紐付けも
+    /// 見る必要があるが、`step`/`run`のシグネチャは変えたくないため）。
+    signal_kinds: Vec<SignalKind>,
     cycle: u64,
 }
 
 impl Simulator {
     /// 全信号を0で初期化
-    pub fn new(signal_count: usize) -> Self {
+    pub fn new(signals: &[NetlistSignal]) -> Self {
+        let signal_count = signals.len();
         Self {
             signal_values: vec![0; signal_count],
+            prev_signal_values: vec![0; signal_count],
+            signal_kinds: signals.iter().map(|s| s.kind.clone()).collect(),
             cycle: 0,
         }
     }
@@ -75,8 +85,17 @@ impl Simulator {
             );
         }
 
+        // クロック信号は多くの場合、外側スコープの信号がモジュールの`clock`型ポートへ
+        // 組み合わせDriveで接続されている（`u1.clk <= clk`相当）ため、その組み合わせ網が
+        // 収束した後の値（settled）でないと、このサイクルでのクロック変化を検出できない
+        // （`snapshot`は comb 更新前の値なので1サイクル遅れてしまう）。エッジ検出だけは
+        // この`settled`と、1つ前のサイクルの`settled`（`prev_signal_values`）を比較する。
+        let settled = self.signal_values.clone();
+
         // Phase 2: 順序評価（ノンブロッキング）
-        // 参照する値はサイクル開始時の snapshot（comb による更新前）
+        // 代入する値はサイクル開始時の snapshot（comb による更新前）を参照する。
+        // regにクロック紐付けがある場合、このサイクルでそのクロックの立ち上がり
+        // （TODO: 暫定的にposedge固定）が無ければ更新をスキップし、前の値を保持する。
         let mut next = self.signal_values.clone();
         for node in nodes {
             if let Node::Drive {
@@ -86,12 +105,14 @@ impl Simulator {
                 width,
                 ..
             } = node
+                && self.should_update_reg(*signal_id, &settled)
             {
                 let value = eval_node(*source, nodes, &snapshot);
                 next[*signal_id] = mask_to_width(value, *width);
             }
         }
         self.signal_values = next;
+        self.prev_signal_values = settled;
 
         let snapshot_out = CycleSnapshot {
             cycle: self.cycle,
@@ -99,6 +120,25 @@ impl Simulator {
         };
         self.cycle += 1;
         snapshot_out
+    }
+
+    /// このサイクルでregを更新すべきか判定する。
+    /// クロック紐付けが無いreg（トップレベル/テストベンチ直下のreg）は常に`true`
+    /// （既存のステップ単位更新のまま）。クロック紐付けがあるregは、`settled`
+    /// （このサイクルの組み合わせ収束後の値）と`prev_signal_values`（1つ前のサイクルの
+    /// 収束後の値）を比較し、指定エッジが検出された場合のみ`true`。
+    fn should_update_reg(&self, signal_id: usize, settled: &[u64]) -> bool {
+        match &self.signal_kinds[signal_id] {
+            SignalKind::Reg { clock: Some(trigger), .. } => {
+                let prev = self.prev_signal_values[trigger.signal_id];
+                let curr = settled[trigger.signal_id];
+                match trigger.edge {
+                    Edge::Posedge => prev == 0 && curr != 0,
+                    Edge::Negedge => prev != 0 && curr == 0,
+                }
+            }
+            _ => true,
+        }
     }
 
     /// Nサイクル実行し、全スナップショットを返す

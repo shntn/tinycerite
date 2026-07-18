@@ -10,8 +10,11 @@ module adder {
 }
 
 testbench tb {
+    var count: bit<2>;
     var clk: clock;
-    clk <= !clk;            // クロック分周
+
+    count <= count + 1;
+    clk <= (count >> 1) & 1 ;       // クロック分周
 
     var x: bit<8>;
     var y: bit<8>;
@@ -23,6 +26,9 @@ testbench tb {
         y = 4;
         step;               // 1サイクル進める
         step;
+        step;
+        step;
         z = u1.sum;
+        step;
     }
 }

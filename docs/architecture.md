@@ -162,7 +162,7 @@ testbench tb {
 - モジュール内に順序代入が1つでもあれば`clock`型入力ポートが必須、`clock`型入力ポートは高々1つ
 - インスタンス化時の接続は`clock`型どうし・`bit`型どうしでしか繋げない（型不一致はエラー）
 - regの`clock`はそのモジュールの`clock`入力ポートに紐付く。モジュールの外（トップレベル/テストベンチ直下）の順序代入はモジュールに属さないため対象外
-- 現状トリガーの向きはposedge固定（暫定処置）。regがクロックのエッジでのみ更新されるという評価モデル自体はまだ実装しておらず、今回追加したのはクロックへの紐付けの静的チェックのみ。詳細は後述の`netlist`モジュール節を参照
+- regは実際にクロックの立ち上がりエッジでのみ更新される（`Simulator::step`が`SignalKind::Reg.clock`を見てエッジ検出する）。クロック紐付けが無いreg（モジュールの外のreg）は今まで通り毎ステップ更新される。現状トリガーの向きはposedge固定（暫定処置）。詳細は後述の`simulator`モジュール節を参照
 
 ## テストベンチの例
 
@@ -1042,14 +1042,16 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - 役割: ネットリストを評価して波形を生成する。
 - フィールド:
   - `signal_values: Vec<u64>` — 現在の各信号の値（信号ID順）
+  - `prev_signal_values: Vec<u64>` — 直前の`step`呼び出しの`settled`（1つ前のサイクルの組み合わせ収束後の値）。regのクロックエッジ検出に使う
+  - `signal_kinds: Vec<SignalKind>` — 各信号の種別（wire/reg、およびregのクロック紐付け）を`NetlistSignal`から複製して持つ（`step`/`run`のシグネチャを変えずに`SignalKind`を参照できるようにするため）
   - `cycle: u64` — 経過サイクル数
 
 ### 関数
 
-`Simulator::new(signal_count: usize) -> Self` :
+`Simulator::new(signals: &[NetlistSignal]) -> Self` :
 
-- 概要: 全信号を0で初期化したシミュレーターを生成する。
-- 引数: `signal_count` — 信号の数
+- 概要: 全信号を0で初期化したシミュレーターを生成する。`signals`から`SignalKind`だけを複製して`signal_kinds`に保持する。
+- 引数: `signals` — ネットリストの信号リスト（`clock`紐付けの参照に使うため、単なる信号数ではなく`NetlistSignal`そのものを受け取る）
 
 `Simulator::set_signal(&mut self, id: usize, value: u64)` :
 
@@ -1067,16 +1069,22 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 
 - 概要: 1サイクル分シミュレーションを進め、結果のスナップショットを返す。
 - 処理:
-  1. スナップショット取得: サイクル開始時の全信号値をクローンする（ノンブロッキング参照用）
+  1. スナップショット取得: サイクル開始時の全信号値（`snapshot`）をクローンする（ノンブロッキングの代入値評価に使う）
   2. Phase 1 — 組み合わせ評価（Δ-サイクル、最大1000回）:
      - 全コンビネーション Drive ノードを評価し、`mask_to_width` で駆動先信号の幅に切り詰めてから信号値を即時更新
      - 値が収束するまで（変更がなくなるまで）ループ
      - 1000回の反復で収束しなければ組合せループと判定してパニック
-  3. Phase 2 — 順序評価:
-     - 全シーケンシャル Drive ノードを評価（参照する値は Phase 1 開始前のスナップショット）、同様に `mask_to_width` で幅に切り詰める
-     - 評価結果を `next` 配列に格納
-     - `next` → `signal_values` に一斉コミット
-  4. サイクルカウンタを進め、`CycleSnapshot` を返す
+  3. `settled`取得: Phase 1収束後の全信号値をクローンする（regのクロックエッジ検出専用。クロック信号はモジュールの`clock`型ポートへ組み合わせDriveで接続されていることが多く、その組み合わせ網が収束した後の値でないと、このサイクルでのクロック変化を正しく検出できないため、代入値評価に使う`snapshot`（comb更新前）とは別に持つ）
+  4. Phase 2 — 順序評価:
+     - 全シーケンシャル Drive ノードについて、`should_update_reg`でこのサイクルに更新すべきか判定する。クロック紐付けの無いreg（モジュールの外のreg）は常に`true`
+     - 更新すべきものだけ評価（参照する値は`snapshot`。Phase 1開始前の値、代入時のみ`mask_to_width`で幅に切り詰め）し、`next`配列に格納。更新しないものは`next`内の既存値（前サイクルの値）のまま据え置かれる
+     - `next` → `signal_values` に一斉コミット、`settled` → `prev_signal_values`（次回`step`呼び出し時の比較用）に保存
+  5. サイクルカウンタを進め、`CycleSnapshot` を返す
+
+`Simulator::should_update_reg(&self, signal_id: usize, settled: &[u64]) -> bool` :
+
+- 概要: このサイクルで`signal_id`のregを更新すべきか判定する。
+- 処理: `self.signal_kinds[signal_id]`が`Reg { clock: Some(trigger), .. }`なら、`prev_signal_values[trigger.signal_id]`（1つ前のサイクルの収束後の値）と`settled[trigger.signal_id]`（このサイクルの収束後の値）を比較し、`trigger.edge`が`Posedge`なら`0→非0`、`Negedge`なら`非0→0`の遷移でのみ`true`。それ以外（`Wire`、または`clock`紐付けの無い`Reg`）は常に`true`（既存のステップ単位更新のまま）。
 
 `Simulator::run(&mut self, nodes: &[Node], cycles: u64) -> Vec<CycleSnapshot>` :
 
@@ -1213,8 +1221,8 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 |---------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | 単項マイナス（`-a`）                  | `ast.rs` (UnOp::Neg 追加), `grammar.pest` (unary_opに`-`追加), `parser.rs`, `netlist.rs`, `simulator.rs`                   |
 | ビットベクタリテラルの桁区切り（`8'b0000_0001`） | `grammar.pest` (literal_digitsに`_`許容), `parser.rs` (パース時に`_`除去)                                    |
-| regのエッジトリガー評価（`clock`が実際にエッジでのみregを更新する。現状は`clock`の紐付け・検証のみで、評価自体は毎ステップ更新のまま） | `simulator.rs`（`Simulator::step`が`SignalKind::Reg.clock`を見て、トリガー信号のエッジを検出したときだけ更新するように変更。`clock: None`の信号は現行のstep単位更新のまま据え置き） |
-| クロックのnegedge/両エッジ対応（現状`Edge::Posedge`固定） | `grammar.pest`/`ast.rs`/`parser.rs`（ポート宣言でエッジ指定の構文を追加）, `elaboration.rs`（`clock_port`にエッジ情報を持たせる）, `netlist.rs`（`flatten_scope`のTODOコメント箇所で固定値をやめる） |
+| クロックのnegedge/両エッジ対応（現状`Edge::Posedge`固定） | `grammar.pest`/`ast.rs`/`parser.rs`（ポート宣言でエッジ指定の構文を追加）, `elaboration.rs`（`clock_port`にエッジ情報を持たせる）, `netlist.rs`（`flatten_scope`のTODOコメント箇所で固定値をやめる）, `simulator.rs`（`should_update_reg`は`trigger.edge`を見るだけなので変更不要） |
+| regのリセット対応（`SignalKind::Reg.reset`は先行実装のみで未使用） | `grammar.pest`/`ast.rs`/`parser.rs`（リセット信号・値を指定する構文を追加）, `elaboration.rs`, `netlist.rs`（`ResetSpec`を実際に埋める）, `simulator.rs`（`Simulator::step`でリセットトリガーを検出し値を上書き） |
 | if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
 | モジュールのネスト（モジュールが別のモジュールをインスタンス化） | `grammar.pest` (`inst_decl`を`module_def`本体にも許可), `elaboration.rs` (`resolve_module_def`にインスタンス解決を追加、モジュール定義同士の循環インスタンス化を検出する依存グラフチェックを追加) |
 | インスタンス境界をまたぐ組合せループの検出（エラボレーション時点） | `elaboration.rs` (モジュール定義ごとに`input`→`output`の組合せ依存を要約し、`InstanceField`の`collect_read_signals`をその要約で置き換える) |

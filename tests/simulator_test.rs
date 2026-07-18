@@ -7,7 +7,7 @@ fn setup(input: &str) -> (Simulator, Vec<netlist::Node>, Vec<netlist::NetlistSig
     let prog = Parser::parse_program(input).unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     let nl = netlist::build_netlist(&elab);
-    let sim = Simulator::new(nl.signals.len());
+    let sim = Simulator::new(&nl.signals);
     (sim, nl.nodes, nl.signals)
 }
 
@@ -233,7 +233,7 @@ fn run_initial(input: &str) -> (Simulator, Vec<netlist::Node>, Vec<netlist::Netl
     let prog = Parser::parse_program(input).unwrap();
     let elab = elaboration::elaborate(&prog).unwrap();
     let nl = netlist::build_netlist(&elab);
-    let mut sim = Simulator::new(nl.signals.len());
+    let mut sim = Simulator::new(&nl.signals);
 
     for step in &nl.initial {
         match step {
