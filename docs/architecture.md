@@ -25,13 +25,13 @@ Netlist (信号DAG、階層情報は名前空間プレフィックスのみ)
 program     = (module_def | testbench_def)+
 
 # モジュール定義
-module_def  = "module" ident "{" port_block (decl | stmt)* "}"
+module_def  = "module" ident "{" port_block (decl | stmt | if_stmt)* "}"
 port_block  = "port" "{" port_decl* "}"
 port_decl   = ident ":" ("input" | "output") signal_type ";"
 signal_type = "clock" | ("bit" ("<" number ">")?)
 
 # テストベンチ定義（プログラム中に高々1つ。トップレベルの信号空間はここでのみ構築される）
-testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
+testbench_def = "testbench" ident "{" (decl | inst_decl | stmt | if_stmt)* initial_block? "}"
 initial_block = "initial" "{" (proc_assign | proc_step)* "}"
 proc_assign   = ident "=" ternary_expr ";"
 proc_step     = "step" ";"
@@ -42,6 +42,12 @@ inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
 named_arg   = ident ":" ternary_expr
 
 stmt        = ident ("=" | "<=") ternary_expr ";"
+
+# if/elif/else: 継続代入の糖衣構文（パース時に三項演算子のネストへ脱糖され、
+# 実行時の新しい意味論は追加しない。elseは必須）。詳細は「if/elif/else」節を参照
+if_stmt     = "if" expression "{" (stmt | if_stmt)* "}"
+              ("elif" expression "{" (stmt | if_stmt)* "}")*
+              "else" "{" (stmt | if_stmt)* "}"
 
 # 三項演算子（右結合、演算子の中で最も優先度が低い）
 ternary_expr      = expression ("?" ternary_expr ":" ternary_expr)?
@@ -79,6 +85,7 @@ bitvec_literal = number "'" ("b" | "o" | "d" | "h") [0-9a-zA-Z]+
   - モジュール内で順序代入（reg相当）を1つでも使う場合、そのモジュールに`clock`型の入力ポートが必須（無いとエラー）。`clock`型の入力ポートは高々1つ（2つ以上はエラー）。`output`に`clock`型は使えない（エラー）。詳細は「クロック」節を参照
 - `var 名前 = モジュール名(ポート名: 式, ...);` — モジュールインスタンス化。`input` ポートだけを名前付き引数として接続する（構造体リテラルではなく関数呼び出し風の構文）。全`input`ポート分の接続が必須で、過不足・`output`ポートの指定はエラー。`clock`型ポートへの接続には`clock`型の信号のみ許可される（逆に`clock`型の信号を`bit`型ポートに繋ぐのもエラー）
 - `インスタンス名.出力ポート名` — インスタンスの出力を式の中で読み出す（例: `z = u1.sum + 1;`）。`input`ポートを外部から読み出そうとするとエラー
+- `if cond { ... } (elif cond { ... })* else { ... }` — 継続代入の糖衣構文（`module_def`本体・`testbench_def`の並行部分に書ける）。パース時に、各分岐で代入されている変数ごとに `cond ? then_val : else_val` のネストへ脱糖され、実行時の新しい意味論は追加しない。`else`は必須、各分岐の代入先変数の集合と代入演算子（`=`/`<=`）は完全に一致している必要がある（不一致・分岐内での二重代入はパースエラー）。詳細は「if/elif/else」節を参照
 - `testbench name { (decl | inst_decl | stmt)* initial_block? }` — テストベンチ定義。プログラム中に高々1つ（2つ以上あるとエラー）。トップレベルの信号空間はここでのみ構築される（`decl`/`inst_decl`/`stmt`以外の場所に信号を宣言する手段は無い）。クロック信号もここで普通の代入文として作る（例: `clk <= !clk;`で毎サイクルトグル、`clk <= counter & 1;`で分周。1回の`Simulator::step`が最小の時間刻みなので、クロックの1周期は自然に2ステップになる。`clock`型として宣言するかどうかは任意だが、モジュールの`clock`型ポートに接続するには`clock`型として宣言されている必要がある）
 - `initial { (proc_assign | proc_step)* }` — テストベンチ内の手続き部分（省略可）。並行部分とは異なる意味論を持つ: 上から順に、1文ずつ実行される
   - `proc_assign`（`target = expr;`）— その瞬間に一度だけ`target`に値を設定する（継続的な駆動ではない。`Simulator::set_signal`相当）
@@ -137,6 +144,34 @@ testbench tb {
 
 - モジュールが別のモジュールをインスタンス化すること（ネスト）は未対応（文法上、`inst_decl` は `testbench_def` の中にのみ許可されている）
 - インスタンス境界をまたぐ組合せループ（あるインスタンスの出力を同じインスタンスの入力に戻すような配線）はエラボレーション時点では検出できない。詳細は後述の `elaboration` モジュール節を参照
+
+## if/elif/elseの例
+
+```
+var a: bit<8>;
+var x: bit<8>;
+
+if a == 0 {
+    x = 10;
+} elif a == 1 {
+    x = 20;
+} else {
+    x = 30;
+}
+```
+
+上の例は、パース時点で以下と全く同じ`Stmt::Combinational`1文に脱糖される（新しいASTノード・解決済み表現・ネットリストノード・シミュレータ意味論は一切追加しない）:
+
+```
+x = a == 0 ? 10 : (a == 1 ? 20 : 30);
+```
+
+- `else`は必須。省略するとパースエラー（全分岐で値が定まっている必要があるため、ハードウェア的な「ラッチ推論」に相当する曖昧な状態を許さない）
+- 各分岐（if/elif.../else）で代入されている変数の集合が完全に一致していなければパースエラー（一部の分岐にしかない変数がある場合）
+- 同じ変数への代入演算子（`=`/`<=`）は全分岐で同じでなければパースエラー
+- 同じ分岐内で同じ変数に2回代入するとパースエラー
+- 分岐の中に`if`を入れ子にできる（内側の`if`がまず脱糖され、その結果の`Stmt`が外側の分岐の一部として扱われる）
+- 詳細（脱糖アルゴリズム）は後述の `parser` モジュール節（`parse_if_stmt`/`desugar_if_chain`）を参照
 
 ## クロックの例
 
@@ -383,8 +418,8 @@ testbench tb {
 
 `parse_module_def(pair: Pair<Rule>) -> Result<ModuleDef>` :
 
-- 概要: `module_def`（`"module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}"`）から `ModuleDef` を構築。
-- 処理: 子ペアから `Rule::ident` → モジュール名（`is_keyword`でキーワード検査）、`Rule::port_block` → `parse_port_block()`、`Rule::decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_stmt()` に振り分け。
+- 概要: `module_def`（`"module" ~ ident ~ "{" ~ port_block ~ (decl | stmt | if_stmt)* ~ "}"`）から `ModuleDef` を構築。
+- 処理: 子ペアから `Rule::ident` → モジュール名（`is_keyword`でキーワード検査）、`Rule::port_block` → `parse_port_block()`、`Rule::decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_stmt()` に振り分け、`Rule::if_stmt` → `parse_if_stmt()`が返す`Vec<Stmt>`を`stmts`にそのまま連結（`if`/`elif`/`else`はパース時に脱糖されるため、`ModuleDef.stmts`の型は変わらない）。
 
 `parse_port_block(pair: Pair<Rule>) -> Result<Vec<PortDecl>>` :
 
@@ -403,8 +438,8 @@ testbench tb {
 
 `parse_testbench_def(pair: Pair<Rule>) -> Result<TestbenchDef>` :
 
-- 概要: `testbench_def`（`"testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}"`）から `TestbenchDef` を構築。
-- 処理: 子ペアから `Rule::ident` → テストベンチ名（`is_keyword`でキーワード検査）、`Rule::decl`/`Rule::inst_decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_inst_decl()`/`parse_stmt()` に振り分け、`Rule::initial_block` → `parse_initial_block()`。
+- 概要: `testbench_def`（`"testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt | if_stmt)* ~ initial_block? ~ "}"`）から `TestbenchDef` を構築。
+- 処理: 子ペアから `Rule::ident` → テストベンチ名（`is_keyword`でキーワード検査）、`Rule::decl`/`Rule::inst_decl`/`Rule::stmt` → それぞれ `parse_decl()`/`parse_inst_decl()`/`parse_stmt()` に振り分け、`Rule::if_stmt` → `parse_if_stmt()`が返す`Vec<Stmt>`を`stmts`にそのまま連結、`Rule::initial_block` → `parse_initial_block()`。
 
 `parse_initial_block(pair: Pair<Rule>) -> Result<Vec<ProcStmt>>` :
 
@@ -434,6 +469,38 @@ testbench tb {
 
 - 概要: `stmt` ルールのペアから `Stmt` を構築。
 - 処理: 子ペアから `Rule::ident` → 代入先、`Rule::assign` or `Rule::nonblock` → 代入種別、`Rule::ternary_expr` → 右辺を抽出。代入先の変数名は `is_keyword` でキーワードでないか検査し、キーワードならエラー。
+
+`parse_if_stmt(pair: Pair<Rule>) -> Result<Vec<Stmt>>` :
+
+- 概要: `if_stmt`（`"if" ~ expression ~ "{" ~ stmt_list ~ "}" ~ elif_clause* ~ "else" ~ "{" ~ stmt_list ~ "}"`）をパースし、継続代入（`Stmt`）のリストへ脱糖する。新しいASTノードは追加せず、既存の`Stmt::Combinational`/`Stmt::Sequential`と`Expr::Ternary`だけで表現する。
+- 処理: 子ペアを走査し、`Rule::expression`を見た直後の`Rule::stmt_list`は「その式を条件とするif/elif本体」、条件を伴わず現れる`Rule::stmt_list`（最後の1つ）は`else`本体、`Rule::elif_clause`は`parse_elif_clause()`で`(条件式, 本体)`に変換して集める。最終的に集まった`arms: Vec<(Expr, Vec<Stmt>)>`と`else_body: Vec<Stmt>`（無ければパースエラー、`else`は必須）を`desugar_if_chain()`に渡す。
+
+`parse_stmt_list(pair: Pair<Rule>) -> Result<Vec<Stmt>>` :
+
+- 概要: `stmt_list`（`(stmt | if_stmt)*`）から`Stmt`のリストを構築する。
+- 処理: `Rule::stmt` → `parse_stmt()`、`Rule::if_stmt` → `parse_if_stmt()`（再帰。入れ子の`if`はこの時点で既に脱糖済みの`Stmt`列になっているため、そのまま平坦に連結するだけでよい）。
+
+`parse_elif_clause(pair: Pair<Rule>) -> Result<(Expr, Vec<Stmt>)>` :
+
+- 概要: `elif_clause`（`"elif" ~ expression ~ "{" ~ stmt_list ~ "}"`）を`(条件式, 本体)`のタプルに変換する。
+
+`desugar_if_chain(arms: Vec<(Expr, Vec<Stmt>)>, else_body: Vec<Stmt>) -> Result<Vec<Stmt>>` :
+
+- 概要: `if`/`elif`.../`else`の各分岐を、代入先変数ごとの三項演算子ネストへ脱糖する。
+- 処理:
+  1. 各分岐の本体（`Vec<Stmt>`）を`branch_to_map()`で「代入先変数名 → (順序代入か, 右辺式)」のリストに変換する（同じ分岐内で同じ変数に2回代入していればここでエラー）
+  2. 全分岐（`else`＋各`arm`）に登場する変数名の集合を求める（順序は`else`分岐の代入順、`else`に無ければ各`arm`に現れた順）
+  3. 変数ごとに、`else`分岐から出発して`arms`を末尾から先頭へ辿りながら`Expr::Ternary { cond: arm_cond, then_branch: arm_expr, else_branch: 直前までに組み立てた式 }`を重ねていく。これにより`if`の条件が最終的な木の最も外側（最優先）になり、通常のif/elif/elseの優先順位（上の条件ほど優先）と一致する
+  4. 各段階で、対象の変数がその分岐に存在しない場合や、代入演算子（`=`/`<=`）が分岐間で異なる場合はエラーにする（全分岐で同じ変数集合・同じ代入演算子であることを要求する）
+  5. 変数ごとに組み上がった式を、元の代入演算子のまま`Stmt::Combinational`/`Stmt::Sequential`として`Vec<Stmt>`にまとめて返す
+
+`branch_to_map(stmts: Vec<Stmt>) -> Result<Vec<(String, bool, Expr)>>` :
+
+- 概要: 1つの分岐の本体を「代入先変数名 → (順序代入か, 右辺式)」のリストに変換する（`bool`は`Sequential`なら`true`）。同じ分岐内で同じ変数に2回代入していればエラー。
+
+`find_target(map: &[(String, bool, Expr)], target: &str) -> Option<(bool, Expr)>` :
+
+- 概要: `branch_to_map`が作ったリストから、指定した変数名のエントリを探して`(順序代入か, 右辺式のクローン)`を返す（無ければ`None`）。
 
 `parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr>` :
 
@@ -488,7 +555,7 @@ testbench tb {
 
 `is_keyword(s: &str) -> bool` :
 
-- 概要: 文字列がキーワード（`var` / `bit` / `clock` / `module` / `port` / `input` / `output` / `testbench` / `initial` / `step`）かどうかを判定する。
+- 概要: 文字列がキーワード（`var` / `bit` / `clock` / `module` / `port` / `input` / `output` / `testbench` / `initial` / `step` / `if` / `elif` / `else`）かどうかを判定する。
 - 背景: `grammar.pest` の `ident` ルールはキーワードを構文上区別しない（`var`/`bit`なども識別子として受理できてしまう）ため、識別子を確定させる各箇所（`parse_decl`・`parse_stmt`・`parse_expression_factor`・`parse_module_def`・`parse_port_decl`・`parse_inst_decl`・`parse_field_access`・`parse_testbench_def`・`parse_proc_assign`）でこの関数を呼んでキーワードを弾き、変数名・モジュール名・ポート名・インスタンス名・テストベンチ名としての使用を防いでいる。
 
 ### 文法ファイル: `grammar.pest`
@@ -500,13 +567,13 @@ testbench tb {
 ```pest
 program = { SOI ~ (module_def | testbench_def)+ ~ EOI }
 
-module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
+module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt | if_stmt)* ~ "}" }
 port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
 port_decl  = { ident ~ ":" ~ direction ~ signal_type ~ ";" }
 direction  = { "input" | "output" }
 signal_type = { "clock" | ("bit" ~ ("<" ~ number ~ ">")?) }
 
-testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}" }
+testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt | if_stmt)* ~ initial_block? ~ "}" }
 initial_block = { "initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}" }
 proc_assign   = { ident ~ "=" ~ ternary_expr ~ ";" }
 proc_step     = { "step" ~ ";" }
@@ -517,6 +584,10 @@ named_arg = { ident ~ ":" ~ ternary_expr }
 stmt      = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
 assign    = { "=" }
 nonblock  = { "<=" }
+
+if_stmt     = { "if" ~ expression ~ "{" ~ stmt_list ~ "}" ~ elif_clause* ~ "else" ~ "{" ~ stmt_list ~ "}" }
+elif_clause = { "elif" ~ expression ~ "{" ~ stmt_list ~ "}" }
+stmt_list   = { (stmt | if_stmt)* }
 ternary_expr      = { expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)? }
 expression        = { expression1 ~ (or_op ~ expression1)* }
 expression1       = { expression2 ~ (and_op ~ expression2)* }
@@ -565,7 +636,8 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* }
 - `expression_factor` では `bitvec_literal` を `number` より先に置いている。`4'b1010` の `4` の部分だけで `number` にマッチしてしまうと、続く `'b1010` が余ってパース全体が失敗する。PEGの順序付き選択では `bitvec_literal` を先に試し、`'` が続かない入力（例えば単なる `42`）では自動的にバックトラックして `number` にフォールバックする。
 - 同様に `field_access`（`ident ~ "." ~ ident`）も `expression_factor` の中で単独の `ident` より先に置いている。`u1.sum` の `u1` だけで `ident` にマッチしてしまうと `.sum` が余ってパースが壊れるため、`field_access` を先に試し、`.` が続かない入力では `ident` にバックトラックする。
 - `inst_decl`（モジュールインスタンス化）は `testbench_def` の中にのみあり、`module_def` の本体（`(decl | stmt)*`）には含まれていない。これにより「モジュールが別のモジュールをインスタンス化する」というネストが文法レベルで禁止されている（現状の制限。将来ネストに対応する場合はここを緩める）。
-- `testbench_def` の `(decl | inst_decl | stmt)*` の直後に `initial_block?` を続けている。`initial` はキーワードなので `stmt`（`ident ~ (assign | nonblock) ~ ...`）が「initial」を識別子として食おうとしても、続く `{` が `assign`/`nonblock`（`=`/`<=`）にマッチせず `stmt` の試行は失敗し、`decl`/`inst_decl` も `"initial"` では始まらないため `(decl | inst_decl | stmt)*` はそこで自然に止まり、`initial_block` の解析に移る。
+- `testbench_def` の `(decl | inst_decl | stmt | if_stmt)*` の直後に `initial_block?` を続けている。`initial` はキーワードなので `stmt`（`ident ~ (assign | nonblock) ~ ...`）が「initial」を識別子として食おうとしても、続く `{` が `assign`/`nonblock`（`=`/`<=`）にマッチせず `stmt` の試行は失敗し、`decl`/`inst_decl`/`if_stmt` も `"initial"` では始まらないため `(decl | inst_decl | stmt | if_stmt)*` はそこで自然に止まり、`initial_block` の解析に移る。
+- `if_stmt`/`elif_clause`は本体を`stmt_list`（`(stmt | if_stmt)*`）という名前付きルールで包んでいる。もし本体を`if_stmt`直下に生の`(stmt | if_stmt)*`として展開すると、`elif_clause`を挟んでいてもif本体とelse本体がどちらも同じ`Rule::stmt`/`Rule::if_stmt`の列として並ぶだけになり、`parse_if_stmt`が「どこまでがifの本体でどこからがelseの本体か」を子ペアの並びだけから判別できなくなる（`elif_clause`が0個の場合は特に区別する手がかりが無い）。`stmt_list`という別名のルールで包むことで、if本体・各elifの本体（`elif_clause`が自己完結的に持つ）・else本体がそれぞれ独立した`Rule::stmt_list`/`Rule::elif_clause`のペアとして現れ、`parse_if_stmt`は`Rule::expression`の直後に来た`stmt_list`をif/elifの本体、条件を伴わず最後に現れる`stmt_list`をelse本体として曖昧さなく区別できる。
 - `program` は `SOI ~ ... ~ EOI` で入力全体の消費を明示的に要求している。pestの`Parser::parse()`は、指定したルールが入力の**先頭部分**にさえ一致すれば成功を返し、末尾に残った未消費の入力があってもエラーにしない（`EOI`を明示しない限り）。これを`SOI`/`EOI`無しのまま放置すると、例えば`//`コメントのようにこの文法がサポートしていない構文が入力の途中に現れた場合、そこで静かにパースを打ち切り、それ以降の内容（コメントの後に続くはずのブロック全体など）を**エラーも警告も無く**捨ててしまう（実際にこの不備が原因で、コメント付きのソースの後半ブロックが丸ごと無視されるバグが起きたことがある）。`EOI`まで明示的に要求することで、こうした未消費の残りは即座にパースエラーになる。
 - `COMMENT`（`"//" ~ (!"\n" ~ ANY)*`）は行コメントを定義する silent ルール。`WHITESPACE`と同様、`COMMENT`という名前の非atomicルールは暗黙的に他のルールのトークン間（`~`の間）に挿入されるため、個々のルールで明示的にコメントを許可する記述は不要。
 
@@ -1207,7 +1279,7 @@ cargo run -- --cycles 6   # サンプルコードを6サイクル
 | ビットベクタリテラルの桁区切り（`8'b0000_0001`） | `grammar.pest` (literal_digitsに`_`許容), `parser.rs` (パース時に`_`除去)                                    |
 | クロックのnegedge/両エッジ対応（現状`Edge::Posedge`固定） | `grammar.pest`/`ast.rs`/`parser.rs`（ポート宣言でエッジ指定の構文を追加）, `elaboration.rs`（`clock_port`にエッジ情報を持たせる）, `netlist.rs`（`flatten_scope`のTODOコメント箇所で固定値をやめる）, `simulator.rs`（`should_update_reg`は`trigger.edge`を見るだけなので変更不要） |
 | regのリセット対応（`SignalKind::Reg.reset`は先行実装のみで未使用） | `grammar.pest`/`ast.rs`/`parser.rs`（リセット信号・値を指定する構文を追加）, `elaboration.rs`, `netlist.rs`（`ResetSpec`を実際に埋める）, `simulator.rs`（`Simulator::step`でリセットトリガーを検出し値を上書き） |
-| if/case 文                            | `ast.rs` (Stmt 拡張), `grammar.pest`, `parser.rs`, `netlist.rs` (Node 拡張), `simulator.rs`                                |
+| `case`/`switch`文（多分岐セレクタ） | `grammar.pest`/`parser.rs`（`if_stmt`と同様、パース時に`Expr::Ternary`のネストへ脱糖すれば`ast.rs`/`elaboration.rs`/`netlist.rs`/`simulator.rs`は変更不要） |
 | モジュールのネスト（モジュールが別のモジュールをインスタンス化） | `grammar.pest` (`inst_decl`を`module_def`本体にも許可), `elaboration.rs` (`resolve_module_def`にインスタンス解決を追加、モジュール定義同士の循環インスタンス化を検出する依存グラフチェックを追加) |
 | インスタンス境界をまたぐ組合せループの検出（エラボレーション時点） | `elaboration.rs` (モジュール定義ごとに`input`→`output`の組合せ依存を要約し、`InstanceField`の`collect_read_signals`をその要約で置き換える) |
 | `assert`（テストベンチの値検証）      | `grammar.pest` (`initial_block`に`assert`文を追加), `ast.rs` (`ProcStmt::Assert`追加), `parser.rs`, `elaboration.rs` (`ResolvedProcStmt::Assert`), `netlist.rs` (`InitialStep::Assert`), `main.rs` (`run_initial_sequence`で評価しpass/fail報告) |

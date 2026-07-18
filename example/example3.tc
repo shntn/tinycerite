@@ -6,7 +6,11 @@ module adder {
         sum: output bit<8>;
     }
 
-    sum <= a + b;
+    if a & 1 {
+        sum <= (a + b) * 2;
+    } else {
+        sum <= a + b;
+    }
 }
 
 testbench tb {
@@ -25,6 +29,13 @@ testbench tb {
         x = 3;
         y = 4;
         step;               // 1サイクル進める
+        step;
+        step;
+        step;
+        z = u1.sum;
+        x = 4;
+        y = 6;
+        step;
         step;
         step;
         step;

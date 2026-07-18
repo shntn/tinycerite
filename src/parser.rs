@@ -9,6 +9,7 @@ fn is_keyword(s: &str) -> bool {
     matches!(
         s,
         "var" | "bit" | "clock" | "module" | "port" | "input" | "output" | "testbench" | "initial" | "step"
+            | "if" | "elif" | "else"
     )
 }
 
@@ -85,6 +86,7 @@ fn parse_module_def(pair: Pair<Rule>) -> Result<ModuleDef> {
             Rule::port_block => ports = parse_port_block(inner)?,
             Rule::decl => decls.push(parse_decl(inner)?),
             Rule::stmt => stmts.push(parse_stmt(inner)?),
+            Rule::if_stmt => stmts.extend(parse_if_stmt(inner)?),
             _ => {} // "{" "}" などは無視
         }
     }
@@ -179,6 +181,7 @@ fn parse_testbench_def(pair: Pair<Rule>) -> Result<TestbenchDef> {
             Rule::decl => decls.push(parse_decl(inner)?),
             Rule::inst_decl => instances.push(parse_inst_decl(inner)?),
             Rule::stmt => stmts.push(parse_stmt(inner)?),
+            Rule::if_stmt => stmts.extend(parse_if_stmt(inner)?),
             Rule::initial_block => initial = parse_initial_block(inner)?,
             _ => {} // "{" "}" などは無視
         }
@@ -337,6 +340,158 @@ fn parse_stmt(pair: Pair<Rule>) -> Result<Stmt> {
     } else {
         Ok(Stmt::Combinational { target, expr })
     }
+}
+
+/// `if_stmt`（`"if" ~ expression ~ "{" ~ stmt_list ~ "}" ~ elif_clause* ~ "else" ~ "{" ~ stmt_list ~ "}"`）を
+/// パースし、継続代入（`Stmt`）のリストへ脱糖する。
+///
+/// 各分岐（if/elif.../else）は、代入する変数の集合と代入演算子（=/<=）が完全に一致している
+/// 必要がある（一部の分岐にしかない変数や、分岐によって=/<=が違う変数はエラー）。新しい実行時の
+/// ノード/意味論は追加せず、変数ごとに`cond1 ? val1 : (cond2 ? val2 : ... : val_else)`という
+/// 三項演算子のネストに変換して`Stmt::Combinational`/`Stmt::Sequential`を組み立てる（`desugar_if_chain`）。
+fn parse_if_stmt(pair: Pair<Rule>) -> Result<Vec<Stmt>> {
+    let mut arms: Vec<(Expr, Vec<Stmt>)> = Vec::new();
+    let mut else_body: Option<Vec<Stmt>> = None;
+    let mut pending_cond: Option<Expr> = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => pending_cond = Some(parse_expression(inner)?),
+            Rule::stmt_list => {
+                let body = parse_stmt_list(inner)?;
+                match pending_cond.take() {
+                    Some(cond) => arms.push((cond, body)),
+                    None => else_body = Some(body),
+                }
+            }
+            Rule::elif_clause => arms.push(parse_elif_clause(inner)?),
+            _ => {} // "if" "elif" "else" "{" "}" は無視
+        }
+    }
+
+    let else_body = else_body.ok_or_else(|| ParseError {
+        message: "if文にはelse節が必要です".to_string(),
+    })?;
+
+    desugar_if_chain(arms, else_body)
+}
+
+/// `stmt_list`（`(stmt | if_stmt)*`）をパースする。ネストした`if_stmt`はこの時点で
+/// 既に脱糖済みの`Stmt`列になっているため、そのまま平坦に連結する。
+fn parse_stmt_list(pair: Pair<Rule>) -> Result<Vec<Stmt>> {
+    let mut stmts = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::stmt => stmts.push(parse_stmt(inner)?),
+            Rule::if_stmt => stmts.extend(parse_if_stmt(inner)?),
+            _ => {}
+        }
+    }
+    Ok(stmts)
+}
+
+/// `elif_clause`（`"elif" ~ expression ~ "{" ~ stmt_list ~ "}"`）を`(条件式, 本体)`に変換する
+fn parse_elif_clause(pair: Pair<Rule>) -> Result<(Expr, Vec<Stmt>)> {
+    let mut cond = None;
+    let mut body = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => cond = Some(parse_expression(inner)?),
+            Rule::stmt_list => body = parse_stmt_list(inner)?,
+            _ => {}
+        }
+    }
+    let cond = cond.ok_or_else(|| ParseError {
+        message: "elifの条件式が見つかりません".to_string(),
+    })?;
+    Ok((cond, body))
+}
+
+/// if/elif/elseの各分岐を、変数ごとの三項演算子ネストへ脱糖する。
+///
+/// 各分岐の本体を「代入先変数名 → (順序代入か, 右辺式)」のリストに変換し（`branch_to_map`）、
+/// 全分岐（if/elif...とelse）で代入先の集合と代入演算子が完全に一致することを検査する。
+/// 一致すれば、変数ごとに`cond_1 ? val_1 : (cond_2 ? val_2 : ... : val_else)`というネストした
+/// `Expr::Ternary`を組み立て、元の代入演算子のまま`Stmt`を生成する。
+fn desugar_if_chain(arms: Vec<(Expr, Vec<Stmt>)>, else_body: Vec<Stmt>) -> Result<Vec<Stmt>> {
+    let else_map = branch_to_map(else_body)?;
+    let mut arm_maps = Vec::with_capacity(arms.len());
+    for (cond, body) in arms {
+        arm_maps.push((cond, branch_to_map(body)?));
+    }
+
+    // 全分岐に登場する変数名の集合（順序はelse節の代入順、無ければ各分岐に現れた順）
+    let mut all_targets: Vec<String> = else_map.iter().map(|(name, ..)| name.clone()).collect();
+    for (_, map) in &arm_maps {
+        for (name, ..) in map {
+            if !all_targets.contains(name) {
+                all_targets.push(name.clone());
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for target in &all_targets {
+        let (mut is_seq, mut expr) = find_target(&else_map, target).ok_or_else(|| ParseError {
+            message: format!(
+                "if/elif/elseの各分岐は同じ変数を代入する必要があります: 変数 '{}' がelse節にありません",
+                target
+            ),
+        })?;
+
+        for (cond, map) in arm_maps.iter().rev() {
+            let (arm_is_seq, arm_expr) = find_target(map, target).ok_or_else(|| ParseError {
+                message: format!(
+                    "if/elif/elseの各分岐は同じ変数を代入する必要があります: 変数 '{}' が一部の分岐にありません",
+                    target
+                ),
+            })?;
+            if arm_is_seq != is_seq {
+                return Err(ParseError {
+                    message: format!("変数 '{}' の代入演算子（=/<=）が分岐ごとに異なります", target),
+                });
+            }
+            expr = Expr::Ternary {
+                cond: Box::new(cond.clone()),
+                then_branch: Box::new(arm_expr),
+                else_branch: Box::new(expr),
+            };
+            is_seq = arm_is_seq;
+        }
+
+        result.push(if is_seq {
+            Stmt::Sequential { target: target.clone(), expr }
+        } else {
+            Stmt::Combinational { target: target.clone(), expr }
+        });
+    }
+
+    Ok(result)
+}
+
+/// 1つの分岐の本体を「代入先変数名 → (順序代入か, 右辺式)」のリストに変換する
+/// （同じ分岐内で同じ変数に2回代入するとエラー）
+fn branch_to_map(stmts: Vec<Stmt>) -> Result<Vec<(String, bool, Expr)>> {
+    let mut map: Vec<(String, bool, Expr)> = Vec::new();
+    for stmt in stmts {
+        let (target, is_seq, expr) = match stmt {
+            Stmt::Combinational { target, expr } => (target, false, expr),
+            Stmt::Sequential { target, expr } => (target, true, expr),
+        };
+        if map.iter().any(|(name, ..)| name == &target) {
+            return Err(ParseError {
+                message: format!("if/elif/elseの分岐内で変数 '{}' に複数回代入されています", target),
+            });
+        }
+        map.push((target, is_seq, expr));
+    }
+    Ok(map)
+}
+
+fn find_target(map: &[(String, bool, Expr)], target: &str) -> Option<(bool, Expr)> {
+    map.iter()
+        .find(|(name, ..)| name == target)
+        .map(|(_, is_seq, expr)| (*is_seq, expr.clone()))
 }
 
 /// `ternary_expr`（`expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)?`）を解決する

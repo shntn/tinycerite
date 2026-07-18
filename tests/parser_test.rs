@@ -528,3 +528,102 @@ fn multiple_testbenches_parse_but_are_rejected_later() {
     let prog = parse("testbench a { } testbench b { }");
     assert_eq!(prog.testbenches.len(), 2);
 }
+
+#[test]
+fn if_elif_else_desugars_to_nested_ternary_combinational_stmt() {
+    let prog = parse(
+        "testbench tb { var a: bit<8>; var x: bit<8>; if a == 0 { x = 10; } elif a == 1 { x = 20; } else { x = 30; } }",
+    );
+    let stmts = &prog.testbenches[0].stmts;
+    assert_eq!(stmts.len(), 1, "if/elif/elseは変数xへの代入1文だけに脱糖される");
+    match &stmts[0] {
+        Stmt::Combinational { target, expr } => {
+            assert_eq!(target, "x");
+            match expr {
+                Expr::Ternary { cond, then_branch, else_branch } => {
+                    assert!(matches!(**cond, Expr::BinOp { op: BinOp::Eq, .. }), "最外はifの条件(a==0)");
+                    assert!(matches!(**then_branch, Expr::Number(10)));
+                    assert!(matches!(**else_branch, Expr::Ternary { .. }), "elseの位置にelifが入れ子になる");
+                }
+                _ => panic!("Ternaryが期待される"),
+            }
+        }
+        _ => panic!("Combinationalが期待される"),
+    }
+}
+
+#[test]
+fn if_else_without_elif_desugars_correctly() {
+    let prog = parse("testbench tb { var a: bit; var x: bit; if a == 0 { x = 1; } else { x = 0; } }");
+    assert_eq!(prog.testbenches[0].stmts.len(), 1);
+}
+
+#[test]
+fn if_without_else_is_error() {
+    assert!(Parser::parse_program("testbench tb { var a: bit; var x: bit; if a == 0 { x = 1; } }").is_err());
+}
+
+#[test]
+fn if_branches_with_mismatched_targets_is_error() {
+    let prog = Parser::parse_program(
+        "testbench tb { var a: bit; var x: bit; var y: bit; if a == 0 { x = 1; y = 1; } else { x = 0; } }",
+    );
+    assert!(prog.is_err(), "elseにyへの代入が無いのでエラー");
+}
+
+#[test]
+fn if_branches_with_mismatched_assign_kind_is_error() {
+    let prog = Parser::parse_program(
+        "testbench tb { var a: bit; var x: bit; if a == 0 { x = 1; } else { x <= 0; } }",
+    );
+    assert!(prog.is_err(), "同じ変数への代入演算子(=/<=)が分岐によって違うのでエラー");
+}
+
+#[test]
+fn if_branch_assigning_same_target_twice_is_error() {
+    let prog = Parser::parse_program(
+        "testbench tb { var a: bit; var x: bit; if a == 0 { x = 1; x = 2; } else { x = 0; } }",
+    );
+    assert!(prog.is_err(), "同じ分岐内で同じ変数に2回代入するのはエラー");
+}
+
+#[test]
+fn if_preserves_sequential_assignment_kind() {
+    let prog = parse("testbench tb { var a: bit; var x: bit; if a == 0 { x <= 1; } else { x <= 0; } }");
+    match &prog.testbenches[0].stmts[0] {
+        Stmt::Sequential { target, .. } => assert_eq!(target, "x"),
+        _ => panic!("Sequentialが期待される"),
+    }
+}
+
+#[test]
+fn if_can_assign_multiple_targets_per_branch() {
+    let prog = parse(
+        "testbench tb { var a: bit; var x: bit; var y: bit; if a == 0 { x = 1; y = 2; } else { x = 3; y = 4; } }",
+    );
+    assert_eq!(prog.testbenches[0].stmts.len(), 2, "x, yそれぞれに1文ずつ脱糖される");
+}
+
+#[test]
+fn nested_if_inside_else_branch_parses_and_flattens() {
+    let prog = parse(
+        "testbench tb { var a: bit; var b: bit; var y: bit; \
+         if a == 0 { y = 1; } else { if b == 0 { y = 2; } else { y = 3; } } }",
+    );
+    assert_eq!(prog.testbenches[0].stmts.len(), 1, "入れ子のif/elseも最終的に1文へ脱糖される");
+}
+
+#[test]
+fn if_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("testbench tb { var if: bit; }").is_err());
+}
+
+#[test]
+fn elif_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("testbench tb { var elif: bit; }").is_err());
+}
+
+#[test]
+fn else_keyword_as_signal_name_is_error() {
+    assert!(Parser::parse_program("testbench tb { var else: bit; }").is_err());
+}

@@ -1,12 +1,12 @@
 program = { SOI ~ (module_def | testbench_def)+ ~ EOI }
 
-module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt)* ~ "}" }
+module_def = { "module" ~ ident ~ "{" ~ port_block ~ (decl | stmt | if_stmt)* ~ "}" }
 port_block = { "port" ~ "{" ~ port_decl* ~ "}" }
 port_decl  = { ident ~ ":" ~ direction ~ signal_type ~ ";" }
 direction  = { "input" | "output" }
 signal_type = { "clock" | ("bit" ~ ("<" ~ number ~ ">")?) }
 
-testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt)* ~ initial_block? ~ "}" }
+testbench_def = { "testbench" ~ ident ~ "{" ~ (decl | inst_decl | stmt | if_stmt)* ~ initial_block? ~ "}" }
 initial_block = { "initial" ~ "{" ~ (proc_assign | proc_step)* ~ "}" }
 proc_assign   = { ident ~ "=" ~ ternary_expr ~ ";" }
 proc_step     = { "step" ~ ";" }
@@ -17,6 +17,15 @@ named_arg = { ident ~ ":" ~ ternary_expr }
 stmt      = { ident ~ (assign | nonblock) ~ ternary_expr ~ ";" }
 assign    = { "=" }
 nonblock  = { "<=" }
+
+// if/elif/else: 継続代入の糖衣構文。各分岐は同じ変数集合を同じ代入演算子で
+// 代入する必要があり、パース時に三項演算子のネストへ脱糖される（新しい実行時
+// 意味論は追加しない）。`else`は省略できない（全分岐で値が定まる必要があるため）。
+// 各分岐の本体を`stmt_list`という名前付きルールで包むことで、if本体とelse本体を
+// （elif_clauseを挟んでいても）曖昧さなく区別できるようにしている。
+if_stmt     = { "if" ~ expression ~ "{" ~ stmt_list ~ "}" ~ elif_clause* ~ "else" ~ "{" ~ stmt_list ~ "}" }
+elif_clause = { "elif" ~ expression ~ "{" ~ stmt_list ~ "}" }
+stmt_list   = { (stmt | if_stmt)* }
 ternary_expr      = { expression ~ ("?" ~ ternary_expr ~ ":" ~ ternary_expr)? }
 expression        = { expression1 ~ (or_op ~ expression1)* }
 expression1       = { expression2 ~ (and_op ~ expression2)* }

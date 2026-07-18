@@ -41,12 +41,12 @@ testbench tb {
 
 ```
 program       = (module_def | testbench_def)+
-module_def    = "module" ident "{" port_block (decl | stmt)* "}"
+module_def    = "module" ident "{" port_block (decl | stmt | if_stmt)* "}"
 port_block    = "port" "{" port_decl* "}"
 port_decl     = ident ":" ("input" | "output") signal_type ";"
 signal_type   = "clock" | ("bit" ("<" number ">")?)
 
-testbench_def = "testbench" ident "{" (decl | inst_decl | stmt)* initial_block? "}"
+testbench_def = "testbench" ident "{" (decl | inst_decl | stmt | if_stmt)* initial_block? "}"
 initial_block = "initial" "{" (proc_assign | proc_step)* "}"
 proc_assign   = ident "=" ternary_expr ";"
 proc_step     = "step" ";"
@@ -54,6 +54,10 @@ proc_step     = "step" ";"
 decl        = "var" ident ":" signal_type ";"
 inst_decl   = "var" ident "=" ident "(" (named_arg ("," named_arg)*)? ")" ";"
 named_arg   = ident ":" ternary_expr
+
+if_stmt     = "if" expression "{" (stmt | if_stmt)* "}"
+              ("elif" expression "{" (stmt | if_stmt)* "}")*
+              "else" "{" (stmt | if_stmt)* "}"
 
 stmt        = ident ("=" | "<=") ternary_expr ";"
 ternary_expr= expr ("?" ternary_expr ":" ternary_expr)?  # 三項演算子、右結合、優先度は最低
@@ -106,6 +110,27 @@ testbench tb {
 - モジュール定義は宣言された時点で（インスタンス化の有無によらず）1回だけ検証される
 - モジュールが別のモジュールをインスタンス化すること（ネスト）は現状未対応
 - 既知の制限: あるインスタンスの出力を同じインスタンスの入力に戻すような、インスタンス境界をまたぐ組合せループはエラボレーション時点では検出できない（`InstanceField`読み出しは依存グラフ上では葉として扱われるため）。実際にそのような回路を書いた場合、シミュレーション実行時のΔ-サイクル上限（`MAX_COMB_ITERATIONS`）でパニックとして検出される
+
+### if / elif / else
+
+```
+var a: bit<8>;
+var x: bit<8>;
+
+if a == 0 {
+    x = 10;
+} elif a == 1 {
+    x = 20;
+} else {
+    x = 30;
+}
+```
+
+- `module`本体・`testbench`の並行部分に書ける。`else`は省略できない（全分岐で値が定まっている必要があるため）
+- 新しい実行時の意味論は無い。**パース時に三項演算子のネストへ脱糖される**（上の例は`x = a == 0 ? 10 : (a == 1 ? 20 : 30);`と全く同じ）。ハードウェア的にはマルチプレクサそのもの
+- 各分岐（if/elif.../else）で代入する変数の集合が完全に一致している必要がある。一部の分岐にしかない変数、分岐によって`=`/`<=`が異なる変数、同じ分岐内で同じ変数への2回代入はいずれもパースエラー
+- 分岐の中に`if`を入れ子にできる（脱糖された結果がさらに外側の脱糖に組み込まれる）
+- 1つの`if`/`elif`/`else`ブロックで複数の変数へ代入してよい（変数ごとに独立した1文へ脱糖される）
 
 ### クロック
 
@@ -180,6 +205,8 @@ testbench tb {
 - `initial`内に`assert`のような検証構文は無い
 - シミュレーションはパニックによる停止のみ（VCDダンプ未対応）
 - regの`clock`トリガーはposedge固定（暫定処置。negedge/両エッジは未対応）
+- `case`文は無い（`if`/`elif`/`else`のみ）
+- `if`/`elif`/`else`は継続代入の糖衣構文であり、`initial { }`内の手続き的な条件分岐（`proc_assign`側）としては使えない
 
 ## アーキテクチャ
 
